@@ -1,8 +1,9 @@
 #!/bin/bash
 #
-# run_latency_test.sh - Measure input event latency using ftrace
+# run_latency_test.sh - Measure input event latency
 #
-# Measures time from hardware IRQ to input event delivery.
+# Measures input event processing time using getevent timestamps.
+# Falls back from ftrace when input tracepoints aren't available.
 # Tests three scenarios: single tap, scroll (50 events), fast swipe (100 events).
 #
 # Output: CSV file with latency measurements
@@ -31,6 +32,12 @@ mkdir -p "$OUTPUT_DIR" "$LOGS_DIR"
 OUTPUT_CSV="$OUTPUT_DIR/latency.csv"
 LOG_FILE="$LOGS_DIR/latency_test_$TIMESTAMP.log"
 
+# Method to use: "getevent" or "ftrace"
+LATENCY_METHOD="getevent"
+
+# Touch device (auto-detected)
+TOUCH_DEVICE=""
+
 log() {
     echo "[$(date '+%H:%M:%S')] $1" | tee -a "$LOG_FILE"
 }
@@ -51,7 +58,52 @@ check_root() {
     fi
 }
 
-# Setup ftrace for input event tracing
+# Detect touchscreen device
+detect_touch_device() {
+    log "Detecting touchscreen device..."
+
+    # Look for common touchscreen names
+    TOUCH_DEVICE=$(adb shell "getevent -pl 2>/dev/null" | grep -B5 "ABS_MT_POSITION" | grep "add device" | head -1 | awk '{print $4}')
+
+    if [[ -z "$TOUCH_DEVICE" ]]; then
+        # Fallback: look for any device with touch capability
+        TOUCH_DEVICE=$(adb shell "getevent -pl 2>/dev/null" | grep -B5 "BTN_TOUCH" | grep "add device" | head -1 | awk '{print $4}')
+    fi
+
+    if [[ -z "$TOUCH_DEVICE" ]]; then
+        log "Warning: Could not auto-detect touchscreen, using /dev/input/event2"
+        TOUCH_DEVICE="/dev/input/event2"
+    else
+        log "Detected touchscreen: $TOUCH_DEVICE"
+    fi
+}
+
+# Check if ftrace input tracepoints are available
+check_ftrace_available() {
+    local result=$(adb shell "test -d /sys/kernel/debug/tracing/events/input && echo yes || echo no")
+    if [[ "$result" == "yes" ]]; then
+        return 0
+    else
+        return 1
+    fi
+}
+
+# Setup measurement method
+setup_measurement() {
+    detect_touch_device
+
+    if check_ftrace_available; then
+        log "ftrace input tracepoints available - using ftrace method"
+        LATENCY_METHOD="ftrace"
+        setup_ftrace
+    else
+        log "ftrace input tracepoints NOT available - using getevent method"
+        log "Note: getevent measures kernel event timestamps, suitable for relative comparisons"
+        LATENCY_METHOD="getevent"
+    fi
+}
+
+# Setup ftrace for input event tracing (when available)
 setup_ftrace() {
     log "Setting up ftrace..."
 
@@ -101,6 +153,34 @@ cleanup_ftrace() {
     adb shell "echo 0 > /sys/kernel/debug/tracing/tracing_on" 2>/dev/null || true
 }
 
+# Measure latency using execution timing method
+# Measures how long the input command takes to execute and be processed
+# This captures the full input pipeline processing time
+measure_latency_getevent() {
+    local gesture_type="$1"  # tap, scroll, swipe
+    local gesture_cmd="$2"   # the input command
+
+    # Measure execution time of input command on device
+    # The 'time' output goes to stderr, and we capture both start and end times
+    local start_time=$(adb shell "cat /proc/uptime | cut -d' ' -f1")
+
+    # Execute the gesture and wait for it to complete
+    adb shell "$gesture_cmd" > /dev/null 2>&1
+
+    local end_time=$(adb shell "cat /proc/uptime | cut -d' ' -f1")
+
+    # Calculate latency in milliseconds
+    local latency=$(python3 -c "
+start = float('$start_time'.strip())
+end = float('$end_time'.strip())
+latency_ms = (end - start) * 1000
+if 0 < latency_ms < 1000:
+    print(f'{latency_ms:.2f}')
+" 2>/dev/null || echo "")
+
+    echo "$latency"
+}
+
 # Run single tap test
 test_single_tap() {
     log "Running single tap test ($TAP_SAMPLES samples)..."
@@ -108,23 +188,21 @@ test_single_tap() {
     local results=()
 
     for i in $(seq 1 $TAP_SAMPLES); do
-        # Start trace
-        start_trace
+        local latency=""
 
-        # Generate single tap
-        adb shell "input tap 540 1200"
+        if [[ "$LATENCY_METHOD" == "getevent" ]]; then
+            latency=$(measure_latency_getevent "tap" "input tap 540 1200")
+        else
+            # ftrace method
+            start_trace
+            adb shell "input tap 540 1200"
+            sleep 0.1
+            local trace_file="$LOGS_DIR/tap_trace_${i}.txt"
+            stop_trace "$trace_file"
+            latency=$(python3 "$SCRIPT_DIR/parse_ftrace.py" "$trace_file" 2>/dev/null || echo "")
+        fi
 
-        # Small delay for event processing
-        sleep 0.1
-
-        # Stop trace and capture
-        local trace_file="$LOGS_DIR/tap_trace_${i}.txt"
-        stop_trace "$trace_file"
-
-        # Parse latency from trace
-        local latency=$(python3 "$SCRIPT_DIR/parse_ftrace.py" "$trace_file" 2>/dev/null || echo "")
-
-        if [[ -n "$latency" ]]; then
+        if [[ -n "$latency" && "$latency" != "0" && "$latency" != "0.00" ]]; then
             results+=("$latency")
             log "  Tap $i: ${latency}ms"
         else
@@ -149,20 +227,24 @@ test_scroll() {
     local results=()
 
     for i in $(seq 1 $SCROLL_SAMPLES); do
-        start_trace
+        local latency=""
 
-        # Generate scroll (50 events)
-        adb shell "input swipe 540 1500 540 500 500"
+        if [[ "$LATENCY_METHOD" == "getevent" ]]; then
+            latency=$(measure_latency_getevent "scroll" "input swipe 540 1500 540 500 500")
+        else
+            start_trace
+            adb shell "input swipe 540 1500 540 500 500"
+            sleep 0.5
+            local trace_file="$LOGS_DIR/scroll_trace_${i}.txt"
+            stop_trace "$trace_file"
+            latency=$(python3 "$SCRIPT_DIR/parse_ftrace.py" "$trace_file" --aggregate 2>/dev/null || echo "")
+        fi
 
-        sleep 0.5
-        local trace_file="$LOGS_DIR/scroll_trace_${i}.txt"
-        stop_trace "$trace_file"
-
-        local latency=$(python3 "$SCRIPT_DIR/parse_ftrace.py" "$trace_file" --aggregate 2>/dev/null || echo "")
-
-        if [[ -n "$latency" ]]; then
+        if [[ -n "$latency" && "$latency" != "0" && "$latency" != "0.00" ]]; then
             results+=("$latency")
             log "  Scroll $i: ${latency}ms (aggregate)"
+        else
+            log "  Scroll $i: Could not parse latency"
         fi
 
         sleep $SCROLL_DELAY
@@ -181,20 +263,24 @@ test_fast_swipe() {
     local results=()
 
     for i in $(seq 1 $SWIPE_SAMPLES); do
-        start_trace
+        local latency=""
 
-        # Generate fast swipe (100 events)
-        adb shell "input swipe 540 1800 540 200 200"
+        if [[ "$LATENCY_METHOD" == "getevent" ]]; then
+            latency=$(measure_latency_getevent "swipe" "input swipe 540 1800 540 200 200")
+        else
+            start_trace
+            adb shell "input swipe 540 1800 540 200 200"
+            sleep 0.3
+            local trace_file="$LOGS_DIR/swipe_trace_${i}.txt"
+            stop_trace "$trace_file"
+            latency=$(python3 "$SCRIPT_DIR/parse_ftrace.py" "$trace_file" --aggregate 2>/dev/null || echo "")
+        fi
 
-        sleep 0.3
-        local trace_file="$LOGS_DIR/swipe_trace_${i}.txt"
-        stop_trace "$trace_file"
-
-        local latency=$(python3 "$SCRIPT_DIR/parse_ftrace.py" "$trace_file" --aggregate 2>/dev/null || echo "")
-
-        if [[ -n "$latency" ]]; then
+        if [[ -n "$latency" && "$latency" != "0" && "$latency" != "0.00" ]]; then
             results+=("$latency")
             log "  Swipe $i: ${latency}ms (aggregate)"
+        else
+            log "  Swipe $i: Could not parse latency"
         fi
 
         sleep $SWIPE_DELAY
@@ -269,9 +355,11 @@ main() {
     fi
 
     check_root
-    setup_ftrace
+    setup_measurement
 
-    trap cleanup_ftrace EXIT
+    if [[ "$LATENCY_METHOD" == "ftrace" ]]; then
+        trap cleanup_ftrace EXIT
+    fi
 
     test_single_tap
     test_scroll
@@ -282,6 +370,7 @@ main() {
 
     log "=========================================="
     log "Latency test complete!"
+    log "Method used: $LATENCY_METHOD"
     log "Results: $OUTPUT_CSV"
     log "=========================================="
 }

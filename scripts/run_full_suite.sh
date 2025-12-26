@@ -145,6 +145,21 @@ run_wakeups() {
     fi
 }
 
+# Run power tests
+run_power() {
+    local build_type="$1"
+    log_info "Running power tests (idle + active)..."
+
+    chmod +x "$SCRIPT_DIR/run_power_test.sh"
+    bash "$SCRIPT_DIR/run_power_test.sh" "$build_type"
+
+    if [[ -f "$RESULTS_DIR/$build_type/power.csv" ]]; then
+        log_success "Power tests complete"
+    else
+        log_warning "Power results may be incomplete"
+    fi
+}
+
 # Generate analysis report
 run_analysis() {
     log_info "Generating analysis report..."
@@ -248,6 +263,9 @@ main() {
             echo ""
 
             run_wakeups "$command"
+            echo ""
+
+            run_power "$command"
             echo ""
 
             END_TIME=$(date +%s)

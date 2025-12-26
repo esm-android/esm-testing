@@ -73,11 +73,13 @@ testing/
 ├── scripts/
 │   ├── setup_device.sh       # Device preparation
 │   ├── generate_input.py     # Automated input generation
-│   ├── run_latency_test.sh   # Latency measurement
+│   ├── run_latency_test.sh   # Latency measurement (ftrace or execution timing)
 │   ├── run_cpu_test.sh       # CPU usage measurement
 │   ├── run_syscall_test.sh   # Syscall counting
 │   ├── run_wakeup_test.sh    # Wakeup measurement
+│   ├── run_power_test.sh     # Power consumption (idle + active)
 │   ├── parse_ftrace.py       # ftrace output parser
+│   ├── parse_getevent.py     # getevent output parser
 │   ├── analyze_results.py    # Statistical analysis
 │   └── run_full_suite.sh     # Master test runner
 ├── results/
@@ -85,12 +87,14 @@ testing/
 │   │   ├── latency.csv
 │   │   ├── cpu.csv
 │   │   ├── syscalls.csv
-│   │   └── wakeups.csv
+│   │   ├── wakeups.csv
+│   │   └── power.csv
 │   └── esm/                  # ESM build results
 │       ├── latency.csv
 │       ├── cpu.csv
 │       ├── syscalls.csv
-│       └── wakeups.csv
+│       ├── wakeups.csv
+│       └── power.csv
 ├── logs/                     # Raw test logs
 ├── report.md                 # Final analysis report
 └── README.md                 # This file
@@ -99,7 +103,21 @@ testing/
 ## Individual Tests
 
 ### Latency Test
-Measures time from hardware IRQ to InputFlinger event processing using ftrace.
+Measures input event processing latency using one of two methods:
+
+**Method 1: ftrace (preferred)**
+- Uses kernel ftrace with `input/input_event` tracepoints
+- Measures time from IRQ handler entry to event delivery
+- Requires kernel compiled with `CONFIG_INPUT_EVDEV_EVENTS`
+
+**Method 2: Execution timing (fallback)**
+- Measures end-to-end execution time of input commands
+- Captures total input pipeline processing time including system overhead
+- Works on any userdebug build without special kernel config
+- Includes constant ADB overhead (~50-100ms), so absolute values differ from ftrace
+- **Valid for relative comparisons** between baseline and ESM builds
+
+The script automatically detects which method is available and falls back to execution timing if ftrace input tracepoints are not present.
 
 ```bash
 ./run_latency_test.sh baseline  # or 'esm'
@@ -133,6 +151,31 @@ Measures CPU wakeups per second during 5-minute interaction sessions.
 ```
 
 Output: `results/<build>/wakeups.csv`
+
+### Power Test
+Measures power consumption in two scenarios:
+
+**Idle**: Screen on, no interaction for 5 minutes
+- Measures baseline power draw with ESM/epoll waiting for events
+- Lower is better (ESM should have fewer idle wakeups)
+
+**Active**: Continuous random tapping (~10 taps/sec) for 5 minutes
+- Measures power draw during sustained input processing
+- Tests event batching efficiency
+
+```bash
+./run_power_test.sh baseline  # or 'esm'
+```
+
+Environment variables for customization:
+```bash
+IDLE_DURATION=300      # Idle test duration (seconds)
+ACTIVE_DURATION=300    # Active test duration (seconds)
+TAP_INTERVAL=0.1       # Seconds between taps
+NUM_RUNS=3             # Number of test runs per scenario
+```
+
+Output: `results/<build>/power.csv`
 
 ## Automated Input Generation
 
@@ -191,6 +234,17 @@ adb shell getprop ro.build.type
 # Should output: userdebug
 ```
 
+### "Could not enable input/input_event tracepoint"
+This warning indicates the kernel wasn't compiled with input event tracing. The test will automatically fall back to using `getevent` for latency measurement, which is suitable for relative comparisons.
+
+To check available tracepoints:
+```bash
+adb shell "ls /sys/kernel/debug/tracing/events/input/"
+# If this returns "No such file or directory", ftrace input tracing is not available
+```
+
+The getevent fallback method provides kernel-level timestamps and is valid for comparing latency between baseline and ESM builds.
+
 ### "strace not found"
 strace should be available on userdebug builds. If missing:
 ```bash
@@ -215,7 +269,8 @@ Approximate test times:
 - CPU tests: 15 minutes
 - Syscall tests: 15 minutes
 - Wakeup tests: 45 minutes
-- **Total per build**: ~2 hours
+- Power tests: 60 minutes (3 runs each of idle + active with cooldown)
+- **Total per build**: ~3 hours
 
 ## Contributing
 

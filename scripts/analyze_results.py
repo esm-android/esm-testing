@@ -398,6 +398,63 @@ def main():
             lower_is_better=True
         ))
 
+    # Analyze power (idle and active scenarios)
+    print("Analyzing power results...")
+    baseline_power = load_csv(os.path.join(baseline_dir, 'power.csv'))
+    esm_power = load_csv(os.path.join(esm_dir, 'power.csv'))
+
+    # Idle power - battery drain
+    baseline_idle_drain = [float(r['battery_drain_pct']) for r in baseline_power
+                           if r.get('scenario') == 'idle' and r.get('battery_drain_pct')]
+    esm_idle_drain = [float(r['battery_drain_pct']) for r in esm_power
+                      if r.get('scenario') == 'idle' and r.get('battery_drain_pct')]
+
+    if baseline_idle_drain and esm_idle_drain:
+        results.append(analyze_metric(
+            baseline_idle_drain, esm_idle_drain,
+            "Power - Idle Battery Drain (%)",
+            lower_is_better=True
+        ))
+
+    # Idle power - wakeups
+    baseline_idle_wakeups = [float(r['wakeups_per_sec']) for r in baseline_power
+                              if r.get('scenario') == 'idle' and r.get('wakeups_per_sec')]
+    esm_idle_wakeups = [float(r['wakeups_per_sec']) for r in esm_power
+                         if r.get('scenario') == 'idle' and r.get('wakeups_per_sec')]
+
+    if baseline_idle_wakeups and esm_idle_wakeups:
+        results.append(analyze_metric(
+            baseline_idle_wakeups, esm_idle_wakeups,
+            "Power - Idle Wakeups/sec",
+            lower_is_better=True
+        ))
+
+    # Active power - battery drain
+    baseline_active_drain = [float(r['battery_drain_pct']) for r in baseline_power
+                              if r.get('scenario') == 'active' and r.get('battery_drain_pct')]
+    esm_active_drain = [float(r['battery_drain_pct']) for r in esm_power
+                         if r.get('scenario') == 'active' and r.get('battery_drain_pct')]
+
+    if baseline_active_drain and esm_active_drain:
+        results.append(analyze_metric(
+            baseline_active_drain, esm_active_drain,
+            "Power - Active Battery Drain (%)",
+            lower_is_better=True
+        ))
+
+    # Active power - wakeups
+    baseline_active_wakeups = [float(r['wakeups_per_sec']) for r in baseline_power
+                                if r.get('scenario') == 'active' and r.get('wakeups_per_sec')]
+    esm_active_wakeups = [float(r['wakeups_per_sec']) for r in esm_power
+                           if r.get('scenario') == 'active' and r.get('wakeups_per_sec')]
+
+    if baseline_active_wakeups and esm_active_wakeups:
+        results.append(analyze_metric(
+            baseline_active_wakeups, esm_active_wakeups,
+            "Power - Active Wakeups/sec",
+            lower_is_better=True
+        ))
+
     # Generate report
     if results:
         generate_report(results, output_path)
