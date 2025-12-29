@@ -166,11 +166,12 @@ wait_for_idle() {
 check_esm() {
     log "Checking for ESM kernel symbols..."
 
-    ESM_SYMBOLS=$(adb shell "cat /proc/kallsyms 2>/dev/null | grep -c esm" || echo "0")
+    # Use word boundary to avoid false positives like "resmask" matching "esm"
+    ESM_SYMBOLS=$(adb shell "cat /proc/kallsyms 2>/dev/null | grep -cE ' esm_'" || echo "0")
 
     if [[ "$ESM_SYMBOLS" -gt 0 ]]; then
         log "ESM DETECTED: Found $ESM_SYMBOLS ESM symbols in kernel"
-        adb shell "cat /proc/kallsyms | grep esm | head -10" | while read line; do
+        adb shell "cat /proc/kallsyms | grep -E ' esm_' | head -10" | while read line; do
             log "  $line"
         done
     else
