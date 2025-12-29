@@ -1,20 +1,20 @@
 # ESM Performance Testing Framework
 
-Scientific validation of Event Stream Model (ESM) performance claims for Android 12.
+Scientific measurement of Event Stream Model (ESM) performance for Android 12.
 
 ## Overview
 
-This testing framework validates the following ESM performance claims:
+This testing framework measures ESM performance improvements across the following metrics:
 
-| Metric | Claimed (epoll → ESM) | Claimed Improvement |
-|--------|----------------------|---------------------|
-| Single tap latency | 2.3 ms → 1.8 ms | 21% faster |
-| Scroll (50 events) | 15.7 ms → 11.2 ms | 29% faster |
-| Fast swipe (100 events) | 32.4 ms → 22.1 ms | 32% faster |
-| system_server CPU | 18.2% → 15.7% | 13.7% less |
-| Total system CPU | 42.6% → 39.1% | 8.2% less |
-| Syscalls (100 events) | 300 → 5 | 98% fewer |
-| Wakeups/sec | 142 → 98 | 31% fewer |
+| Metric | Description |
+|--------|-------------|
+| Input latency | Time from kernel input event to InputReader wakeup |
+| CPU usage | system_server and total CPU during interaction |
+| Syscall count | Number of syscalls per batch of input events |
+| Wakeups/sec | CPU wakeups during interactive use |
+| Power consumption | Battery drain in idle and active scenarios |
+
+ESM replaces Android's epoll-based input polling with push-based event delivery. This framework provides rigorous A/B testing to quantify any performance differences.
 
 ## Prerequisites
 
@@ -259,17 +259,15 @@ Sample sizes were determined using power analysis for 80% power at α=0.05:
 | Wakeup | 10 runs × 2min | Sufficient for interrupt rate estimation |
 | Power | 5 runs × 15min | 90 current samples/run provides fine-grained data |
 
-### Validation Criteria
+### Statistical Significance Criteria
 
-Claims are **validated** if:
-- p-value < 0.05 (statistically significant)
-- Improvement direction matches claim
+Results are considered **statistically significant** if:
+- p-value < 0.05 (statistically significant difference)
 - Effect size is medium or large (Cohen's d > 0.5)
 
-Claims are **refuted** if:
-- No significant improvement (p > 0.05)
-- Results show regression
-- Improvement less than 50% of claim
+Results are **not significant** if:
+- p-value ≥ 0.05 (no significant difference)
+- Effect size is small or negligible (Cohen's d < 0.5)
 
 ## Troubleshooting
 
