@@ -15,9 +15,9 @@ RESULTS_DIR="$SCRIPT_DIR/../results"
 LOGS_DIR="$SCRIPT_DIR/../logs"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 
-# Test configuration
-TEST_DURATION=300   # 5 minutes per test
-NUM_RUNS=5          # Number of test runs
+# Test configuration - can be overridden via environment
+TEST_DURATION=${TEST_DURATION:-120}   # 2 minutes per test (sufficient for interrupt counting)
+NUM_RUNS=${NUM_RUNS:-10}              # Number of test runs (increased for statistical significance)
 
 # Determine output directory
 BUILD_TYPE="${1:-unknown}"
@@ -124,7 +124,7 @@ run_wakeup_test() {
 
     local start_time=$(date +%s)
 
-    # Start interaction in background
+    # Start interaction in background (seeded random for reproducibility)
     log "  Generating mixed input events..."
     python3 "$SCRIPT_DIR/generate_input.py" mixed $TEST_DURATION &
     INPUT_PID=$!

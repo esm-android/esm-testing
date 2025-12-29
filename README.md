@@ -30,6 +30,9 @@ This testing framework validates the following ESM performance claims:
   1. **Baseline**: Stock AOSP android-12.0.0_r3
   2. **ESM**: AOSP with ESM patches applied
 
+### Kernel Requirement
+Both builds must include the custom `input_event` ftrace tracepoint added to the evdev driver. See the paper's methodology section for tracepoint implementation details.
+
 ### Build Requirements
 Both builds must be `userdebug` variant for debugging capabilities:
 ```bash
@@ -71,57 +74,84 @@ cat ../report.md
 ```
 testing/
 ├── scripts/
-│   ├── setup_device.sh       # Device preparation
-│   ├── generate_input.py     # Automated input generation
-│   ├── run_latency_test.sh   # Latency measurement (ftrace or execution timing)
-│   ├── run_cpu_test.sh       # CPU usage measurement
-│   ├── run_syscall_test.sh   # Syscall counting
-│   ├── run_wakeup_test.sh    # Wakeup measurement
-│   ├── run_power_test.sh     # Power consumption (idle + active)
-│   ├── parse_ftrace.py       # ftrace output parser
-│   ├── parse_getevent.py     # getevent output parser
-│   ├── analyze_results.py    # Statistical analysis
-│   └── run_full_suite.sh     # Master test runner
+│   ├── setup_device.sh        # Device preparation
+│   ├── generate_input.py      # Automated input generation
+│   ├── run_latency_test.sh    # Latency measurement (ftrace-based)
+│   ├── run_cpu_test.sh        # CPU usage measurement
+│   ├── run_syscall_test.sh    # Syscall counting
+│   ├── run_wakeup_test.sh     # Wakeup measurement
+│   ├── run_power_test.sh      # Power consumption (idle + active)
+│   ├── parse_ftrace_latency.py # ftrace trace parser
+│   ├── analyze_results.py     # Statistical analysis
+│   └── run_full_suite.sh      # Master test runner
 ├── results/
-│   ├── baseline/             # Stock AOSP results
+│   ├── baseline/              # Stock AOSP results
 │   │   ├── latency.csv
 │   │   ├── cpu.csv
 │   │   ├── syscalls.csv
 │   │   ├── wakeups.csv
-│   │   └── power.csv
-│   └── esm/                  # ESM build results
+│   │   ├── power.csv
+│   │   └── traces/            # ftrace trace files
+│   └── esm/                   # ESM build results
 │       ├── latency.csv
 │       ├── cpu.csv
 │       ├── syscalls.csv
 │       ├── wakeups.csv
-│       └── power.csv
-├── logs/                     # Raw test logs
-├── report.md                 # Final analysis report
-└── README.md                 # This file
+│       ├── power.csv
+│       └── traces/            # ftrace trace files
+├── logs/                      # Raw test logs
+├── report.md                  # Final analysis report
+└── README.md                  # This file
 ```
+
+## Physical Touch Requirements
+
+**IMPORTANT**: Some tests require PHYSICAL touch input on the device screen. Automated input injection via `adb shell input tap` or `sendevent` **does not work** for these tests because:
+
+1. Injected events follow a loopback path (userspace → kernel → userspace)
+2. This bypasses the hardware interrupt path that ESM optimizes
+3. Only physical touch from actual hardware traverses the correct kernel→userspace path
+
+### Tests Requiring Physical Touch
+- **Latency tests**: All tap, scroll, and swipe latency measurements
+- **Power tests (active)**: Active power consumption during touch interaction
+
+### Tests Using Automated Input
+- **CPU tests**: Measures overall CPU usage (input path doesn't affect measurement)
+- **Syscall tests**: Counts syscalls (strace captures regardless of input source)
+- **Wakeup tests**: Measures interrupt counts (automated input is sufficient)
+- **Power tests (idle)**: No input required
 
 ## Individual Tests
 
-### Latency Test
-Measures input event processing latency using one of two methods:
+### Latency Test (PHYSICAL TOUCH REQUIRED)
+Measures input event processing latency using kernel ftrace tracing.
 
-**Method 1: ftrace (preferred)**
-- Uses kernel ftrace with `input/input_event` tracepoints
-- Measures time from IRQ handler entry to event delivery
-- Requires kernel compiled with `CONFIG_INPUT_EVDEV_EVENTS`
+**What is measured:**
+- T1: Kernel `trace_input_event()` timestamp in evdev.c
+- T2: `sched_wakeup` timestamp for InputReader thread
+- Latency = T2 - T1 (the epoll/ESM critical path)
 
-**Method 2: Execution timing (fallback)**
-- Measures end-to-end execution time of input commands
-- Captures total input pipeline processing time including system overhead
-- Works on any userdebug build without special kernel config
-- Includes constant ADB overhead (~50-100ms), so absolute values differ from ftrace
-- **Valid for relative comparisons** between baseline and ESM builds
+**Tracepoint placement (evdev.c):**
+```c
+static void evdev_events(...)
+{
+    /* T1: Tracepoint fires here - BEFORE both baseline/ESM paths */
+    for (v = vals; v != vals + count; v++)
+        trace_input_event(dev_name, v->type, v->code, v->value);
 
-The script automatically detects which method is available and falls back to execution timing if ftrace input tracepoints are not present.
+    /* Baseline: evdev_pass_values → wake_up_interruptible() */
+    /* ESM: esm_push_event → wake_up() */
+}
+```
+
+Both paths trigger `sched_wakeup` for InputReader, enabling fair comparison.
 
 ```bash
 ./run_latency_test.sh baseline  # or 'esm'
 ```
+
+The script will prompt you to physically touch the device screen.
 
 Output: `results/<build>/latency.csv`
 
@@ -130,6 +160,12 @@ Measures system_server and total CPU usage during 60-second interaction sessions
 
 ```bash
 ./run_cpu_test.sh baseline  # or 'esm'
+```
+
+Environment variables:
+```bash
+TEST_DURATION=60     # Test duration (seconds)
+NUM_RUNS=10          # Number of test runs
 ```
 
 Output: `results/<build>/cpu.csv`
@@ -144,42 +180,49 @@ Counts syscalls (epoll_wait, read, esm_wait) while processing 100 input events.
 Output: `results/<build>/syscalls.csv`
 
 ### Wakeup Test
-Measures CPU wakeups per second during 5-minute interaction sessions.
+Measures CPU wakeups per second during 2-minute interaction sessions.
 
 ```bash
 ./run_wakeup_test.sh baseline  # or 'esm'
 ```
 
+Environment variables:
+```bash
+TEST_DURATION=120    # Test duration (seconds)
+NUM_RUNS=10          # Number of test runs
+```
+
 Output: `results/<build>/wakeups.csv`
 
-### Power Test
+### Power Test (Active tests require PHYSICAL TOUCH)
 Measures power consumption in two scenarios:
 
-**Idle**: Screen on, no interaction for 5 minutes
+**Idle**: Screen on, no interaction for 15 minutes
 - Measures baseline power draw with ESM/epoll waiting for events
 - Lower is better (ESM should have fewer idle wakeups)
 
-**Active**: Continuous random tapping (~10 taps/sec) for 5 minutes
+**Active** (PHYSICAL TOUCH REQUIRED): Continuous physical tapping for 15 minutes
 - Measures power draw during sustained input processing
-- Tests event batching efficiency
+- Tests event delivery efficiency
+- You will be prompted to tap the screen continuously
 
 ```bash
 ./run_power_test.sh baseline  # or 'esm'
 ```
 
-Environment variables for customization:
+Environment variables:
 ```bash
-IDLE_DURATION=300      # Idle test duration (seconds)
-ACTIVE_DURATION=300    # Active test duration (seconds)
-TAP_INTERVAL=0.1       # Seconds between taps
-NUM_RUNS=3             # Number of test runs per scenario
+IDLE_DURATION=900             # Idle test duration (seconds, default 15 min)
+ACTIVE_DURATION=900           # Active test duration (seconds, default 15 min)
+CURRENT_SAMPLE_INTERVAL=10    # Current sampling interval (seconds)
+NUM_RUNS=5                    # Number of test runs per scenario
 ```
 
 Output: `results/<build>/power.csv`
 
 ## Automated Input Generation
 
-The `generate_input.py` script provides automated touch event generation:
+The `generate_input.py` script provides automated touch event generation with seeded random for reproducibility:
 
 ```bash
 # Generate 100 single taps
@@ -195,6 +238,8 @@ python3 generate_input.py swipe 20
 python3 generate_input.py mixed 60
 ```
 
+Note: Automated input is suitable for CPU, syscall, and wakeup tests, but NOT for latency or active power tests.
+
 ## Statistical Analysis
 
 The analysis script calculates:
@@ -202,6 +247,17 @@ The analysis script calculates:
 - **Descriptive statistics**: Mean, standard deviation, 95% CI
 - **Hypothesis testing**: Welch's t-test for unequal variances
 - **Effect size**: Cohen's d with interpretation
+
+### Sample Size Justification
+
+Sample sizes were determined using power analysis for 80% power at α=0.05:
+
+| Test | Samples | Rationale |
+|------|---------|-----------|
+| Latency | 100 taps | Large effect detection (d=0.8) requires n≥25 |
+| CPU | 10 runs × 60s | CLT ensures normality with 10 samples |
+| Wakeup | 10 runs × 2min | Sufficient for interrupt rate estimation |
+| Power | 5 runs × 15min | 90 current samples/run provides fine-grained data |
 
 ### Validation Criteria
 
@@ -234,24 +290,20 @@ adb shell getprop ro.build.type
 # Should output: userdebug
 ```
 
-### "Could not enable input/input_event tracepoint"
-This warning indicates the kernel wasn't compiled with input event tracing. The test will automatically fall back to using `getevent` for latency measurement, which is suitable for relative comparisons.
-
-To check available tracepoints:
+### "Kernel input_event tracepoint not found"
+The kernel must include the custom ftrace tracepoint. Verify it exists:
 ```bash
-adb shell "ls /sys/kernel/debug/tracing/events/input/"
-# If this returns "No such file or directory", ftrace input tracing is not available
+adb shell "test -d /sys/kernel/debug/tracing/events/input/input_event && echo OK"
+# Should output: OK
 ```
 
-The getevent fallback method provides kernel-level timestamps and is valid for comparing latency between baseline and ESM builds.
+If not present, the kernel needs to be rebuilt with the tracepoint modification.
 
 ### "strace not found"
 strace should be available on userdebug builds. If missing:
 ```bash
 # Check if strace exists
 adb shell which strace
-
-# Alternative: use /proc-based syscall counting
 ```
 
 ### Thermal throttling
@@ -265,12 +317,12 @@ Allow device to cool between test runs.
 
 Approximate test times:
 - Setup: 3 minutes
-- Latency tests: 30 minutes
-- CPU tests: 15 minutes
-- Syscall tests: 15 minutes
-- Wakeup tests: 45 minutes
-- Power tests: 60 minutes (3 runs each of idle + active with cooldown)
-- **Total per build**: ~3 hours
+- Latency tests (physical touch): ~3 minutes
+- CPU tests: ~15 minutes
+- Syscall tests: ~15 minutes
+- Wakeup tests: ~25 minutes
+- Power tests: ~3 hours (5 runs each of 15-min idle + 15-min active with cooldown)
+- **Total per build**: ~4 hours
 
 ## Contributing
 

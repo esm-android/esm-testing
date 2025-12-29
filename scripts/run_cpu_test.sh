@@ -15,10 +15,10 @@ RESULTS_DIR="$SCRIPT_DIR/../results"
 LOGS_DIR="$SCRIPT_DIR/../logs"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 
-# Test configuration
-TEST_DURATION=60    # seconds per test
-NUM_RUNS=5          # number of test runs
-SAMPLE_INTERVAL=1   # CPU sampling interval
+# Test configuration - can be overridden via environment
+TEST_DURATION=${TEST_DURATION:-60}    # seconds per test
+NUM_RUNS=${NUM_RUNS:-10}              # number of test runs (increased for statistical significance)
+SAMPLE_INTERVAL=${SAMPLE_INTERVAL:-1} # CPU sampling interval
 
 # Determine output directory
 BUILD_TYPE="${1:-unknown}"
@@ -72,7 +72,7 @@ run_cpu_test() {
     # Give top time to start
     sleep 2
 
-    # Start automated interaction
+    # Start automated interaction (seeded random for reproducibility)
     log "  Generating input events..."
     python3 "$SCRIPT_DIR/generate_input.py" mixed $TEST_DURATION &
     INPUT_PID=$!

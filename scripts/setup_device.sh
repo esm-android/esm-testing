@@ -43,21 +43,50 @@ enable_root() {
     sleep 2
 }
 
+# Check if using ADB over WiFi
+is_adb_wifi() {
+    # Check if current ADB connection is over TCP (WiFi)
+    # Traditional WiFi: IP:port (e.g., 192.168.1.100:5555)
+    # Android 11+ wireless debugging: adb-*._adb-tls-connect._tcp
+    # USB connections show as device serial (e.g., FA6A10302029)
+    local serial=$(adb get-serialno 2>/dev/null)
+    if [[ "$serial" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+:[0-9]+$ ]]; then
+        return 0  # Traditional WiFi ADB (IP:port format)
+    fi
+    if [[ "$serial" =~ _adb-tls-connect._tcp$ ]]; then
+        return 0  # Android 11+ wireless debugging
+    fi
+    return 1
+}
+
 # Disable radios to reduce interference
 disable_radios() {
-    log "Disabling WiFi..."
-    adb shell svc wifi disable 2>/dev/null || true
+    local serial=$(adb get-serialno 2>/dev/null)
+    log "ADB connection: $serial"
 
-    log "Disabling Bluetooth..."
-    adb shell svc bluetooth disable 2>/dev/null || true
+    # Check if we're connected over WiFi
+    if is_adb_wifi || [[ "${ADB_WIFI:-0}" == "1" ]]; then
+        log "ADB over WiFi detected - keeping WiFi enabled"
+        log "Disabling Bluetooth..."
+        adb shell svc bluetooth disable 2>/dev/null || true
+        log "Disabling mobile data..."
+        adb shell svc data disable 2>/dev/null || true
+        log "NOTE: Skipping airplane mode to maintain WiFi ADB connection"
+    else
+        log "Disabling WiFi..."
+        adb shell svc wifi disable 2>/dev/null || true
 
-    log "Disabling mobile data..."
-    adb shell svc data disable 2>/dev/null || true
+        log "Disabling Bluetooth..."
+        adb shell svc bluetooth disable 2>/dev/null || true
 
-    # Put device in airplane mode for good measure
-    log "Enabling airplane mode..."
-    adb shell settings put global airplane_mode_on 1 2>/dev/null || true
-    adb shell am broadcast -a android.intent.action.AIRPLANE_MODE --ez state true 2>/dev/null || true
+        log "Disabling mobile data..."
+        adb shell svc data disable 2>/dev/null || true
+
+        # Put device in airplane mode for good measure
+        log "Enabling airplane mode..."
+        adb shell settings put global airplane_mode_on 1 2>/dev/null || true
+        adb shell am broadcast -a android.intent.action.AIRPLANE_MODE --ez state true 2>/dev/null || true
+    fi
 }
 
 # Set fixed screen brightness

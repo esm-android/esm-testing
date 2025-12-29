@@ -32,6 +32,8 @@ class TouchConfig:
     tap_delay_ms: int = 100       # Delay between taps
     scroll_duration_ms: int = 500 # Duration of scroll gesture
     swipe_duration_ms: int = 200  # Duration of fast swipe
+    deterministic: bool = False   # Use fixed coordinates for reproducibility
+    seed: int = 42                # Random seed for reproducible "random" patterns
 
 
 class InputGenerator:
@@ -40,6 +42,10 @@ class InputGenerator:
     def __init__(self, config: Optional[TouchConfig] = None):
         self.config = config or TouchConfig()
         self._verify_connection()
+        # Set random seed for reproducibility
+        random.seed(self.config.seed)
+        # Fixed tap positions for deterministic mode (grid pattern)
+        self._fixed_positions = self._generate_grid_positions()
 
     def _verify_connection(self) -> None:
         """Verify ADB connection is available."""
@@ -59,8 +65,37 @@ class InputGenerator:
             text=True
         )
 
+    def _generate_grid_positions(self) -> list:
+        """Generate a grid of fixed tap positions for deterministic mode."""
+        positions = []
+        margin = self.config.safe_margin
+        w = self.config.screen_width
+        h = self.config.screen_height
+
+        # Create a 5x10 grid of tap positions (50 unique positions)
+        for row in range(10):
+            for col in range(5):
+                x = margin + col * (w - 2 * margin) // 4
+                y = margin + 200 + row * (h - 2 * margin - 400) // 9
+                positions.append((x, y))
+
+        return positions
+
     def _random_point(self) -> Tuple[int, int]:
-        """Generate a random point within safe screen area."""
+        """Generate a point within safe screen area.
+
+        If deterministic mode is enabled, cycles through a fixed grid.
+        Otherwise, generates random coordinates (seeded for reproducibility).
+        """
+        if self.config.deterministic:
+            # Cycle through fixed positions
+            if not hasattr(self, '_pos_index'):
+                self._pos_index = 0
+            pos = self._fixed_positions[self._pos_index % len(self._fixed_positions)]
+            self._pos_index += 1
+            return pos
+
+        # Random mode (still seeded for reproducibility)
         x = random.randint(
             self.config.safe_margin,
             self.config.screen_width - self.config.safe_margin

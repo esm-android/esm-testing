@@ -21,11 +21,11 @@ RESULTS_DIR="$SCRIPT_DIR/../results"
 LOGS_DIR="$SCRIPT_DIR/../logs"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 
-# Test configuration
-IDLE_DURATION=${IDLE_DURATION:-300}      # 5 minutes idle test
-ACTIVE_DURATION=${ACTIVE_DURATION:-300}  # 5 minutes active test
-TAP_INTERVAL=${TAP_INTERVAL:-0.1}        # 100ms between taps (10 taps/sec)
-NUM_RUNS=${NUM_RUNS:-3}                  # Number of test runs per scenario
+# Test configuration - can be overridden via environment
+IDLE_DURATION=${IDLE_DURATION:-900}      # 15 minutes idle test (for statistical significance)
+ACTIVE_DURATION=${ACTIVE_DURATION:-900}  # 15 minutes active test
+CURRENT_SAMPLE_INTERVAL=${CURRENT_SAMPLE_INTERVAL:-10}  # Sample current every 10 seconds
+NUM_RUNS=${NUM_RUNS:-5}                  # Number of test runs per scenario
 
 # Screen dimensions (will be auto-detected)
 SCREEN_WIDTH=1080
@@ -132,13 +132,12 @@ get_wakeup_count() {
     adb shell "cat /proc/interrupts" | awk 'NR>1 {sum=0; for(i=2;i<=NF-2;i++) sum+=$i; total+=sum} END {print total}'
 }
 
-# Generate random tap position
-random_tap() {
-    # Generate random x,y within screen bounds (with margin)
-    local margin=50
-    local x=$((RANDOM % (SCREEN_WIDTH - 2*margin) + margin))
-    local y=$((RANDOM % (SCREEN_HEIGHT - 2*margin) + margin))
-    adb shell "input tap $x $y" &
+# Sample current draw and append to file
+sample_current() {
+    local output_file="$1"
+    local current=$(get_battery_current)
+    local timestamp=$(date +%s)
+    echo "$timestamp,$current" >> "$output_file"
 }
 
 # Run idle power test
@@ -157,9 +156,22 @@ test_idle_power() {
 
     log "  Initial: battery=${start_level}%, current=${start_current}mA"
 
-    # Wait for idle duration (screen on, no interaction)
-    log "  Waiting ${IDLE_DURATION} seconds (idle)..."
-    sleep "$IDLE_DURATION"
+    # Create current samples file
+    local current_file="$LOGS_DIR/current_idle_${run_num}.csv"
+    echo "timestamp,current_ma" > "$current_file"
+
+    # Wait for idle duration (screen on, no interaction) with periodic sampling
+    log "  Waiting ${IDLE_DURATION} seconds (idle) with current sampling every ${CURRENT_SAMPLE_INTERVAL}s..."
+    local elapsed=0
+    while [[ $elapsed -lt $IDLE_DURATION ]]; do
+        sample_current "$current_file"
+        sleep "$CURRENT_SAMPLE_INTERVAL"
+        elapsed=$((elapsed + CURRENT_SAMPLE_INTERVAL))
+        # Progress every 5 minutes
+        if [[ $((elapsed % 300)) -eq 0 ]]; then
+            log "    ${elapsed}s / ${IDLE_DURATION}s elapsed"
+        fi
+    done
 
     # Record final state
     local end_level=$(get_battery_level)
@@ -173,17 +185,23 @@ test_idle_power() {
     local wakeup_delta=$((end_wakeups - start_wakeups))
     local wakeups_per_sec=$(echo "scale=2; $wakeup_delta / $duration" | bc)
 
+    # Calculate average current from samples
+    local avg_current=$(tail -n +2 "$current_file" | cut -d, -f2 | \
+        awk '{sum+=$1; count++} END {if(count>0) printf "%.1f", sum/count; else print "N/A"}')
+
     log "  Final: battery=${end_level}%, drain=${battery_drain}%"
+    log "  Average current: ${avg_current}mA"
     log "  Wakeups: ${wakeup_delta} total, ${wakeups_per_sec}/sec"
 
-    # Output result
-    echo "idle,$run_num,$duration,$battery_drain,$start_current,$end_current,$wakeups_per_sec"
+    # Output result (added avg_current)
+    echo "idle,$run_num,$duration,$battery_drain,$start_current,$end_current,$avg_current,$wakeups_per_sec"
 }
 
-# Run active power test (random tapping)
+# Run active power test (PHYSICAL TOUCH REQUIRED)
 test_active_power() {
     local run_num="$1"
     log "Running active power test (run $run_num, ${ACTIVE_DURATION}s)..."
+    log "NOTE: This test requires PHYSICAL touch input on the device screen"
 
     # Reset stats
     reset_battery_stats
@@ -196,20 +214,29 @@ test_active_power() {
 
     log "  Initial: battery=${start_level}%, current=${start_current}mA"
 
-    # Generate continuous random taps for the duration
-    log "  Generating random taps for ${ACTIVE_DURATION} seconds..."
-    local tap_count=0
-    local end_target=$((start_time + ACTIVE_DURATION))
+    # Create current samples file
+    local current_file="$LOGS_DIR/current_active_${run_num}.csv"
+    echo "timestamp,current_ma" > "$current_file"
 
-    while [[ $(date +%s) -lt $end_target ]]; do
-        random_tap
-        tap_count=$((tap_count + 1))
-        sleep "$TAP_INTERVAL"
+    # Prompt user for physical touch input
+    log ">>> TAP THE SCREEN CONTINUOUSLY (~2 taps/sec) for ${ACTIVE_DURATION} seconds <<<"
+    log ">>> Starting in 5 seconds... <<<"
+    sleep 5
+
+    # Wait for active duration with periodic sampling
+    log "  Sampling current for ${ACTIVE_DURATION} seconds during physical interaction..."
+    local elapsed=0
+    while [[ $elapsed -lt $ACTIVE_DURATION ]]; do
+        sample_current "$current_file"
+        sleep "$CURRENT_SAMPLE_INTERVAL"
+        elapsed=$((elapsed + CURRENT_SAMPLE_INTERVAL))
+        # Progress every 5 minutes
+        if [[ $((elapsed % 300)) -eq 0 ]]; then
+            log "    ${elapsed}s / ${ACTIVE_DURATION}s elapsed"
+        fi
     done
 
-    # Wait for any pending taps to complete
-    wait 2>/dev/null || true
-    sleep 1
+    log ">>> Test period complete - you can stop tapping <<<"
 
     # Record final state
     local end_level=$(get_battery_level)
@@ -222,22 +249,25 @@ test_active_power() {
     local battery_drain=$((start_level - end_level))
     local wakeup_delta=$((end_wakeups - start_wakeups))
     local wakeups_per_sec=$(echo "scale=2; $wakeup_delta / $duration" | bc)
-    local taps_per_sec=$(echo "scale=2; $tap_count / $duration" | bc)
+
+    # Calculate average current from samples
+    local avg_current=$(tail -n +2 "$current_file" | cut -d, -f2 | \
+        awk '{sum+=$1; count++} END {if(count>0) printf "%.1f", sum/count; else print "N/A"}')
 
     log "  Final: battery=${end_level}%, drain=${battery_drain}%"
-    log "  Taps: ${tap_count} total, ${taps_per_sec}/sec"
+    log "  Average current: ${avg_current}mA"
     log "  Wakeups: ${wakeup_delta} total, ${wakeups_per_sec}/sec"
 
-    # Output result
-    echo "active,$run_num,$duration,$battery_drain,$start_current,$end_current,$wakeups_per_sec,$tap_count"
+    # Output result (added avg_current, removed tap_count since physical touch)
+    echo "active,$run_num,$duration,$battery_drain,$start_current,$end_current,$avg_current,$wakeups_per_sec"
 }
 
 # Generate CSV output
 generate_csv() {
     log "Generating CSV output..."
 
-    # Create header
-    echo "scenario,run,duration_sec,battery_drain_pct,start_current_ma,end_current_ma,wakeups_per_sec,tap_count" > "$OUTPUT_CSV"
+    # Create header (avg_current_ma is the primary metric for power comparison)
+    echo "scenario,run,duration_sec,battery_drain_pct,start_current_ma,end_current_ma,avg_current_ma,wakeups_per_sec" > "$OUTPUT_CSV"
 
     # Append results
     cat "$LOGS_DIR/power_results.tmp" >> "$OUTPUT_CSV" 2>/dev/null || true
@@ -253,11 +283,12 @@ print_summary() {
     log "=== Power Test Summary ==="
 
     if [[ -f "$OUTPUT_CSV" ]]; then
-        # Calculate averages for each scenario
+        # Calculate averages for each scenario (avg_current is now column 7)
         for scenario in "idle" "active"; do
             local drain_avg=$(grep "^$scenario," "$OUTPUT_CSV" | cut -d, -f4 | awk '{sum+=$1; n++} END {if(n>0) printf "%.2f", sum/n; else print "N/A"}')
-            local wakeups_avg=$(grep "^$scenario," "$OUTPUT_CSV" | cut -d, -f7 | awk '{sum+=$1; n++} END {if(n>0) printf "%.2f", sum/n; else print "N/A"}')
-            log "  $scenario: avg_drain=${drain_avg}%, avg_wakeups=${wakeups_avg}/sec"
+            local current_avg=$(grep "^$scenario," "$OUTPUT_CSV" | cut -d, -f7 | awk '{sum+=$1; n++} END {if(n>0) printf "%.1f", sum/n; else print "N/A"}')
+            local wakeups_avg=$(grep "^$scenario," "$OUTPUT_CSV" | cut -d, -f8 | awk '{sum+=$1; n++} END {if(n>0) printf "%.2f", sum/n; else print "N/A"}')
+            log "  $scenario: avg_drain=${drain_avg}%, avg_current=${current_avg}mA, avg_wakeups=${wakeups_avg}/sec"
         done
     fi
 }
@@ -273,11 +304,14 @@ main() {
         echo "  baseline - Test stock AOSP with epoll"
         echo "  esm      - Test ESM-modified AOSP"
         echo ""
+        echo "NOTE: Active tests require PHYSICAL touch input on the device screen."
+        echo "      This is necessary to measure ESM's actual power impact."
+        echo ""
         echo "Environment variables:"
-        echo "  IDLE_DURATION   - Idle test duration in seconds (default: 300)"
-        echo "  ACTIVE_DURATION - Active test duration in seconds (default: 300)"
-        echo "  TAP_INTERVAL    - Seconds between taps (default: 0.1)"
-        echo "  NUM_RUNS        - Number of test runs per scenario (default: 3)"
+        echo "  IDLE_DURATION           - Idle test duration in seconds (default: 900 = 15 min)"
+        echo "  ACTIVE_DURATION         - Active test duration in seconds (default: 900 = 15 min)"
+        echo "  CURRENT_SAMPLE_INTERVAL - Current sampling interval in seconds (default: 10)"
+        echo "  NUM_RUNS                - Number of test runs per scenario (default: 5)"
         exit 1
     fi
 
