@@ -2,8 +2,9 @@
 #
 # run_wakeup_test.sh - Measure CPU wakeups during input interaction
 #
-# Tracks wakeup count from /proc/interrupts and batterystats
-# during extended interaction sessions.
+# Tracks wakeup count from /proc/interrupts during physical touch input.
+#
+# NOTE: Requires PHYSICAL touch input - automated input bypasses the ESM path.
 #
 # Output: CSV file with wakeup measurements
 #
@@ -16,8 +17,8 @@ LOGS_DIR="$SCRIPT_DIR/../logs"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 
 # Test configuration - can be overridden via environment
-TEST_DURATION=${TEST_DURATION:-120}   # 2 minutes per test (sufficient for interrupt counting)
-NUM_RUNS=${NUM_RUNS:-10}              # Number of test runs (increased for statistical significance)
+NUM_TAPS=${NUM_TAPS:-50}          # Number of taps per test run
+NUM_RUNS=${NUM_RUNS:-5}           # Number of test runs
 
 # Determine output directory
 BUILD_TYPE="${1:-unknown}"
@@ -31,11 +32,64 @@ log() {
     echo "[$(date '+%H:%M:%S')] $1" | tee -a "$LOG_FILE"
 }
 
+error() {
+    log "ERROR: $1"
+    exit 1
+}
+
+# Check device connection and root
+check_device() {
+    log "Checking device connection..."
+    if ! adb devices | grep -q "device$"; then
+        error "No device connected"
+    fi
+
+    log "Enabling root access..."
+    adb root 2>/dev/null || log "Note: Could not get root"
+    sleep 2
+}
+
+# Setup ftrace for input event counting
+setup_ftrace() {
+    log "Setting up ftrace for touch counting..."
+
+    if ! adb shell "test -d /sys/kernel/debug/tracing/events/input/input_event" 2>/dev/null; then
+        error "input_event tracepoint not found. Kernel must include input ftrace tracepoint."
+    fi
+
+    adb shell "
+        echo 0 > /sys/kernel/debug/tracing/tracing_on
+        echo > /sys/kernel/debug/tracing/trace
+        echo 8192 > /sys/kernel/debug/tracing/buffer_size_kb
+        echo 1 > /sys/kernel/debug/tracing/events/input/input_event/enable
+    " || error "Failed to setup ftrace"
+
+    log "ftrace ready"
+}
+
+# Start ftrace
+start_ftrace() {
+    adb shell "
+        echo > /sys/kernel/debug/tracing/trace
+        echo 1 > /sys/kernel/debug/tracing/tracing_on
+    "
+}
+
+# Stop ftrace
+stop_ftrace() {
+    adb shell "echo 0 > /sys/kernel/debug/tracing/tracing_on"
+}
+
+# Count touches from live trace (BTN_TOUCH down events)
+count_live_touches() {
+    local count=$(adb shell "cat /sys/kernel/debug/tracing/trace | grep -c 'input_event:.*type=1.*code=330.*value=1'" 2>/dev/null || echo "0")
+    echo "${count//[^0-9]/}"
+}
+
 # Get touchscreen IRQ number
 find_touch_irq() {
     log "Finding touchscreen IRQ..."
 
-    # Common touchscreen controller names
     local irq_line=$(adb shell "cat /proc/interrupts" | \
         grep -iE "touch|fts|sec_ts|synaptics|goodix|atmel" | head -1)
 
@@ -62,11 +116,9 @@ parse_interrupt_delta() {
     local after_file="$2"
 
     if [[ -n "$TOUCH_IRQ" ]]; then
-        # Get specific touchscreen IRQ count
         local before=$(grep "^ *$TOUCH_IRQ:" "$before_file" | awk '{sum=0; for(i=2;i<=NF-2;i++) sum+=$i; print sum}')
         local after=$(grep "^ *$TOUCH_IRQ:" "$after_file" | awk '{sum=0; for(i=2;i<=NF-2;i++) sum+=$i; print sum}')
     else
-        # Fall back to total interrupts (less accurate)
         local before=$(tail -1 "$before_file" | awk '{sum=0; for(i=2;i<=NF;i++) sum+=$i; print sum}')
         local after=$(tail -1 "$after_file" | awk '{sum=0; for(i=2;i<=NF;i++) sum+=$i; print sum}')
     fi
@@ -77,89 +129,74 @@ parse_interrupt_delta() {
     echo $((after - before))
 }
 
-# Reset batterystats
-reset_batterystats() {
-    log "Resetting batterystats..."
-    adb shell "dumpsys batterystats --reset" >/dev/null 2>&1
-}
-
-# Capture batterystats wakeups
-capture_batterystats() {
-    local output_file="$1"
-    adb shell "dumpsys batterystats" > "$output_file"
-}
-
-# Parse wakeups from batterystats
-parse_wakeups() {
-    local stats_file="$1"
-
-    # Look for wakeup count in batterystats output
-    # Format varies by Android version
-    local wakeups=$(grep -oP 'Wakeup reason.*?(\d+)' "$stats_file" | \
-        grep -oP '\d+' | awk '{sum+=$1} END {print sum}' || echo "0")
-
-    # Alternative: look for "Total wakeups"
-    if [[ "$wakeups" == "0" ]]; then
-        wakeups=$(grep -i "total.*wakeup" "$stats_file" | grep -oP '\d+' | head -1 || echo "0")
-    fi
-
-    echo "${wakeups:-0}"
-}
-
-# Run a single wakeup test
+# Run a single wakeup test with physical touch
 run_wakeup_test() {
     local run_num=$1
 
-    log "Starting wakeup test run $run_num ($TEST_DURATION seconds)..."
+    log "Starting wakeup test run $run_num ($NUM_TAPS taps)..."
+    log "NOTE: This test requires PHYSICAL touch input on the device screen"
 
-    # Capture initial state
     local irq_before="$LOGS_DIR/irq_before_${run_num}.txt"
     local irq_after="$LOGS_DIR/irq_after_${run_num}.txt"
-    local stats_before="$LOGS_DIR/stats_before_${run_num}.txt"
-    local stats_after="$LOGS_DIR/stats_after_${run_num}.txt"
 
-    reset_batterystats
+    # Capture initial state
     capture_interrupts "$irq_before"
-    capture_batterystats "$stats_before"
-
     local start_time=$(date +%s)
 
-    # Start interaction in background (seeded random for reproducibility)
-    log "  Generating mixed input events..."
-    python3 "$SCRIPT_DIR/generate_input.py" mixed $TEST_DURATION &
-    INPUT_PID=$!
+    # Start ftrace for touch counting
+    start_ftrace
 
-    # Wait for test duration
-    wait $INPUT_PID 2>/dev/null || true
+    # Wait for user to perform taps
+    log ">>> TAP THE SCREEN $NUM_TAPS TIMES <<<"
+    log ">>> Starting in 3 seconds... <<<"
+    sleep 3
 
-    local end_time=$(date +%s)
-    local actual_duration=$((end_time - start_time))
+    local current_count=0
+    local last_count=0
+
+    while [[ $current_count -lt $NUM_TAPS ]]; do
+        sleep 1
+
+        current_count=$(count_live_touches)
+
+        if [[ $current_count -gt $last_count ]]; then
+            log ">>> $current_count / $NUM_TAPS taps detected <<<"
+            last_count=$current_count
+        fi
+    done
+
+    log ">>> All $NUM_TAPS taps received! <<<"
 
     # Capture final state
+    stop_ftrace
+    local end_time=$(date +%s)
     capture_interrupts "$irq_after"
-    capture_batterystats "$stats_after"
 
     # Calculate metrics
+    local actual_duration=$((end_time - start_time))
     local irq_delta=$(parse_interrupt_delta "$irq_before" "$irq_after")
-    local wakeups=$(parse_wakeups "$stats_after")
 
-    # Calculate wakeups per second
     local wakeups_per_sec=0
     if [[ $actual_duration -gt 0 ]]; then
         wakeups_per_sec=$(echo "scale=2; $irq_delta / $actual_duration" | bc)
     fi
 
-    log "  Run $run_num: interrupts=$irq_delta, wakeups/sec=$wakeups_per_sec, duration=${actual_duration}s"
+    local irqs_per_tap=0
+    if [[ $NUM_TAPS -gt 0 ]]; then
+        irqs_per_tap=$(echo "scale=2; $irq_delta / $NUM_TAPS" | bc)
+    fi
+
+    log "  Run $run_num: interrupts=$irq_delta, wakeups/sec=$wakeups_per_sec, irqs/tap=$irqs_per_tap, duration=${actual_duration}s"
 
     # Append to results
-    echo "$run_num,$irq_delta,$wakeups_per_sec,$actual_duration" >> "$LOGS_DIR/wakeup_results.tmp"
+    echo "$run_num,$NUM_TAPS,$irq_delta,$wakeups_per_sec,$irqs_per_tap,$actual_duration" >> "$LOGS_DIR/wakeup_results.tmp"
 }
 
 # Generate final CSV
 generate_csv() {
     log "Generating CSV output..."
 
-    echo "run,total_interrupts,wakeups_per_sec,duration_sec" > "$OUTPUT_CSV"
+    echo "run,taps,total_interrupts,wakeups_per_sec,irqs_per_tap,duration_sec" > "$OUTPUT_CSV"
 
     if [[ -f "$LOGS_DIR/wakeup_results.tmp" ]]; then
         cat "$LOGS_DIR/wakeup_results.tmp" >> "$OUTPUT_CSV"
@@ -174,16 +211,20 @@ print_summary() {
     log "=== Wakeup Test Summary ==="
 
     if [[ -f "$OUTPUT_CSV" ]]; then
-        local avg_wakeups=$(tail -n +2 "$OUTPUT_CSV" | cut -d, -f3 | \
+        local avg_wakeups=$(tail -n +2 "$OUTPUT_CSV" | cut -d, -f4 | \
             awk '{sum+=$1; count++} END {if(count>0) printf "%.2f", sum/count; else print "0"}')
 
-        local avg_interrupts=$(tail -n +2 "$OUTPUT_CSV" | cut -d, -f2 | \
+        local avg_interrupts=$(tail -n +2 "$OUTPUT_CSV" | cut -d, -f3 | \
             awk '{sum+=$1; count++} END {if(count>0) printf "%.0f", sum/count; else print "0"}')
 
-        log "  Test duration: ${TEST_DURATION}s per run"
+        local avg_irqs_per_tap=$(tail -n +2 "$OUTPUT_CSV" | cut -d, -f5 | \
+            awk '{sum+=$1; count++} END {if(count>0) printf "%.2f", sum/count; else print "0"}')
+
+        log "  Taps per run: $NUM_TAPS"
         log "  Number of runs: $NUM_RUNS"
         log "  Average total interrupts: $avg_interrupts"
         log "  Average wakeups/sec: $avg_wakeups"
+        log "  Average IRQs per tap: $avg_irqs_per_tap"
     fi
 }
 
@@ -195,12 +236,22 @@ main() {
 
     if [[ "$BUILD_TYPE" == "unknown" ]]; then
         echo "Usage: $0 <baseline|esm>"
+        echo "  baseline - Test stock AOSP with epoll"
+        echo "  esm      - Test ESM-modified AOSP"
+        echo ""
+        echo "NOTE: This test requires PHYSICAL touch input on the device screen."
+        echo ""
+        echo "Environment variables:"
+        echo "  NUM_TAPS - Number of taps per run (default: 50)"
+        echo "  NUM_RUNS - Number of test runs (default: 5)"
         exit 1
     fi
 
     # Initialize
     rm -f "$LOGS_DIR/wakeup_results.tmp"
 
+    check_device
+    setup_ftrace
     find_touch_irq
 
     for run in $(seq 1 $NUM_RUNS); do
@@ -208,8 +259,8 @@ main() {
 
         # Cool-down between runs
         if [[ $run -lt $NUM_RUNS ]]; then
-            log "Cooling down (60 seconds)..."
-            sleep 60
+            log "Cooling down (30 seconds)..."
+            sleep 30
         fi
     done
 

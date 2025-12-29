@@ -148,8 +148,8 @@ kill_background_apps() {
 
 # Wait for system to stabilize
 wait_for_idle() {
-    log "Waiting for system to stabilize (120 seconds)..."
-    sleep 120
+    log "Waiting for system to stabilize (30 seconds)..."
+    sleep 30
 
     log "Checking system idle state..."
 

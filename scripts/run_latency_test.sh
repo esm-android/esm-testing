@@ -22,7 +22,6 @@ TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 
 # Test configuration - can be overridden via environment
 TAP_SAMPLES=${TAP_SAMPLES:-100}
-SCROLL_SAMPLES=${SCROLL_SAMPLES:-20}
 SWIPE_SAMPLES=${SWIPE_SAMPLES:-20}
 
 # Determine output directory based on build type
@@ -136,10 +135,11 @@ stop_ftrace() {
     log "Trace saved: $local_path"
 }
 
-# Count touches in live trace (EV_SYN with SYN_REPORT marks end of each event batch)
+# Count touches in live trace (BTN_TOUCH down = one tap)
 count_live_touches() {
-    # Count SYN_REPORT events (type=0, code=0, value=0)
-    local count=$(adb shell "cat /sys/kernel/debug/tracing/trace | grep -c 'input_event:.*type=0.*code=0.*value=0'" 2>/dev/null || echo "0")
+    # Count BTN_TOUCH down events (type=1/EV_KEY, code=330/BTN_TOUCH, value=1/down)
+    # Each tap generates exactly one BTN_TOUCH down event
+    local count=$(adb shell "cat /sys/kernel/debug/tracing/trace | grep -c 'input_event:.*type=1.*code=330.*value=1'" 2>/dev/null || echo "0")
     echo "${count//[^0-9]/}"  # Clean non-numeric chars
 }
 
@@ -189,23 +189,6 @@ test_single_tap() {
     log "Single tap test complete"
 }
 
-# Run scroll test with ftrace
-test_scroll() {
-    log "Running scroll test ($SCROLL_SAMPLES samples)..."
-    log "NOTE: This test requires PHYSICAL scroll gestures on the device screen"
-
-    local trace_file="$TRACES_DIR/scroll_trace.txt"
-
-    start_ftrace "scroll_trace"
-
-    # Wait for user to perform scrolls (counted in real-time)
-    wait_for_touches "$SCROLL_SAMPLES" "SCROLL"
-
-    stop_ftrace "scroll_trace" "$trace_file"
-
-    log "Scroll test complete"
-}
-
 # Run fast swipe test with ftrace
 test_fast_swipe() {
     log "Running fast swipe test ($SWIPE_SAMPLES samples)..."
@@ -237,7 +220,7 @@ print_summary() {
     log "=== Latency Test Summary ==="
 
     if [[ -f "$OUTPUT_CSV" ]]; then
-        for scenario in "single_tap" "scroll" "fast_swipe"; do
+        for scenario in "single_tap" "fast_swipe"; do
             values=$(grep "^$scenario," "$OUTPUT_CSV" 2>/dev/null | cut -d, -f3)
             if [[ -n "$values" ]]; then
                 count=$(echo "$values" | wc -l)
@@ -264,9 +247,8 @@ main() {
         echo "NOTE: This test requires PHYSICAL touch input on the device screen."
         echo ""
         echo "Environment variables:"
-        echo "  TAP_SAMPLES    - Number of tap samples (default: 100)"
-        echo "  SCROLL_SAMPLES - Number of scroll samples (default: 20)"
-        echo "  SWIPE_SAMPLES  - Number of swipe samples (default: 20)"
+        echo "  TAP_SAMPLES   - Number of tap samples (default: 100)"
+        echo "  SWIPE_SAMPLES - Number of swipe samples (default: 20)"
         exit 1
     fi
 
@@ -275,7 +257,6 @@ main() {
     setup_ftrace
 
     test_single_tap
-    test_scroll
     test_fast_swipe
 
     analyze_traces

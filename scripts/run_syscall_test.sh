@@ -138,15 +138,15 @@ cleanup_ftrace() {
     " 2>/dev/null || true
 }
 
-# Count touches in trace (EV_KEY with BTN_TOUCH or EV_ABS events)
+# Count touches in trace (BTN_TOUCH down = one tap)
 count_touches_in_trace() {
     local trace_file="$1"
 
-    # Count EV_SYN events (type=0, code=0) which mark end of each touch event batch
-    # Each physical touch generates one SYN_REPORT
-    local syn_count=$(grep -c "input_event:.*type=0.*code=0.*value=0" "$trace_file" 2>/dev/null || echo "0")
+    # Count BTN_TOUCH down events (type=1/EV_KEY, code=330/BTN_TOUCH, value=1/down)
+    # Each tap generates exactly one BTN_TOUCH down event
+    local touch_count=$(grep -c "input_event:.*type=1.*code=330.*value=1" "$trace_file" 2>/dev/null || echo "0")
 
-    echo "$syn_count"
+    echo "$touch_count"
 }
 
 # Wait for N touches, monitoring the trace
@@ -165,8 +165,8 @@ wait_for_touches() {
     while [[ $current_touches -lt $target_touches ]]; do
         sleep $check_interval
 
-        # Check current touch count from live trace
-        current_touches=$(adb shell "cat /sys/kernel/debug/tracing/trace | grep -c 'input_event:.*type=0.*code=0.*value=0'" 2>/dev/null || echo "0")
+        # Check current touch count from live trace (BTN_TOUCH down events)
+        current_touches=$(adb shell "cat /sys/kernel/debug/tracing/trace | grep -c 'input_event:.*type=1.*code=330.*value=1'" 2>/dev/null || echo "0")
         current_touches=${current_touches//[^0-9]/}  # Clean non-numeric chars
 
         if [[ $current_touches -gt $last_count ]]; then

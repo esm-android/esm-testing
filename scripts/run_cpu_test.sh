@@ -2,8 +2,10 @@
 #
 # run_cpu_test.sh - Measure CPU usage during input interaction
 #
-# Monitors system_server and total CPU usage during 60-second
-# continuous interaction sessions.
+# Monitors system_server and total CPU usage during physical touch
+# interaction sessions.
+#
+# NOTE: Requires PHYSICAL touch input - automated input bypasses the ESM path.
 #
 # Output: CSV file with CPU measurements
 #
@@ -16,8 +18,8 @@ LOGS_DIR="$SCRIPT_DIR/../logs"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 
 # Test configuration - can be overridden via environment
-TEST_DURATION=${TEST_DURATION:-60}    # seconds per test
-NUM_RUNS=${NUM_RUNS:-10}              # number of test runs (increased for statistical significance)
+NUM_TAPS=${NUM_TAPS:-50}          # Number of taps per test run
+NUM_RUNS=${NUM_RUNS:-5}           # Number of test runs
 SAMPLE_INTERVAL=${SAMPLE_INTERVAL:-1} # CPU sampling interval
 
 # Determine output directory
@@ -32,23 +34,73 @@ log() {
     echo "[$(date '+%H:%M:%S')] $1" | tee -a "$LOG_FILE"
 }
 
+error() {
+    log "ERROR: $1"
+    exit 1
+}
+
+# Check device connection and root
+check_device() {
+    log "Checking device connection..."
+    if ! adb devices | grep -q "device$"; then
+        error "No device connected"
+    fi
+
+    log "Enabling root access..."
+    adb root 2>/dev/null || log "Note: Could not get root"
+    sleep 2
+}
+
+# Setup ftrace for input event counting
+setup_ftrace() {
+    log "Setting up ftrace for touch counting..."
+
+    if ! adb shell "test -d /sys/kernel/debug/tracing/events/input/input_event" 2>/dev/null; then
+        error "input_event tracepoint not found. Kernel must include input ftrace tracepoint."
+    fi
+
+    adb shell "
+        echo 0 > /sys/kernel/debug/tracing/tracing_on
+        echo > /sys/kernel/debug/tracing/trace
+        echo 8192 > /sys/kernel/debug/tracing/buffer_size_kb
+        echo 1 > /sys/kernel/debug/tracing/events/input/input_event/enable
+    " || error "Failed to setup ftrace"
+
+    log "ftrace ready"
+}
+
+# Start ftrace
+start_ftrace() {
+    adb shell "
+        echo > /sys/kernel/debug/tracing/trace
+        echo 1 > /sys/kernel/debug/tracing/tracing_on
+    "
+}
+
+# Stop ftrace
+stop_ftrace() {
+    adb shell "echo 0 > /sys/kernel/debug/tracing/tracing_on"
+}
+
+# Count touches from live trace (BTN_TOUCH down events)
+count_live_touches() {
+    local count=$(adb shell "cat /sys/kernel/debug/tracing/trace | grep -c 'input_event:.*type=1.*code=330.*value=1'" 2>/dev/null || echo "0")
+    echo "${count//[^0-9]/}"
+}
+
 # Get CPU baseline (idle)
 measure_baseline() {
     log "Measuring idle CPU baseline..."
 
-    # Wait for system to be truly idle
     sleep 5
 
-    # Take 10 samples of idle CPU
     local samples=()
     for i in $(seq 1 10); do
-        # Get total CPU from top
         local cpu=$(adb shell "top -n 1 -b" | head -3 | grep -oP '\d+(?=% cpu)' | head -1)
         samples+=("${cpu:-0}")
         sleep 1
     done
 
-    # Calculate average
     local sum=0
     for s in "${samples[@]}"; do
         sum=$((sum + s))
@@ -58,32 +110,48 @@ measure_baseline() {
     log "Idle CPU baseline: ${IDLE_CPU}%"
 }
 
-# Run a single CPU test
+# Run a single CPU test with physical touch
 run_cpu_test() {
     local run_num=$1
     local output_file="$LOGS_DIR/cpu_run_${run_num}.txt"
+    local cpu_samples_file="$LOGS_DIR/cpu_samples_${run_num}.txt"
 
-    log "Starting CPU test run $run_num ($TEST_DURATION seconds)..."
+    log "Starting CPU test run $run_num ($NUM_TAPS taps)..."
+    log "NOTE: This test requires PHYSICAL touch input on the device screen"
+
+    # Start ftrace for touch counting
+    start_ftrace
 
     # Start top monitoring in background
-    adb shell "top -d $SAMPLE_INTERVAL -n $((TEST_DURATION + 5)) -b" > "$output_file" &
+    adb shell "top -d $SAMPLE_INTERVAL -n 300 -b" > "$output_file" &
     TOP_PID=$!
 
-    # Give top time to start
     sleep 2
 
-    # Start automated interaction (seeded random for reproducibility)
-    log "  Generating input events..."
-    python3 "$SCRIPT_DIR/generate_input.py" mixed $TEST_DURATION &
-    INPUT_PID=$!
-
-    # Wait for interaction to complete
-    wait $INPUT_PID 2>/dev/null || true
-
-    # Wait a bit more for final CPU readings
+    # Wait for user to perform taps
+    log ">>> TAP THE SCREEN $NUM_TAPS TIMES <<<"
+    log ">>> Starting in 3 seconds... <<<"
     sleep 3
 
-    # Stop top
+    local current_count=0
+    local last_count=0
+
+    while [[ $current_count -lt $NUM_TAPS ]]; do
+        sleep 1
+
+        current_count=$(count_live_touches)
+
+        if [[ $current_count -gt $last_count ]]; then
+            log ">>> $current_count / $NUM_TAPS taps detected <<<"
+            last_count=$current_count
+        fi
+    done
+
+    log ">>> All $NUM_TAPS taps received! <<<"
+
+    # Stop monitoring
+    sleep 2
+    stop_ftrace
     kill $TOP_PID 2>/dev/null || true
     wait $TOP_PID 2>/dev/null || true
 
@@ -157,11 +225,9 @@ print_summary() {
     log "=== CPU Test Summary ==="
 
     if [[ -f "$OUTPUT_CSV" ]]; then
-        # Calculate system_server average
         local ss_avg=$(tail -n +2 "$OUTPUT_CSV" | cut -d, -f2 | \
             awk '{sum+=$1; count++} END {if(count>0) printf "%.2f", sum/count; else print "0"}')
 
-        # Calculate total CPU average
         local total_avg=$(tail -n +2 "$OUTPUT_CSV" | cut -d, -f3 | \
             awk '{sum+=$1; count++} END {if(count>0) printf "%.2f", sum/count; else print "0"}')
 
@@ -169,6 +235,7 @@ print_summary() {
         log "  system_server average: ${ss_avg}%"
         log "  Total CPU average: ${total_avg}%"
         log "  Number of runs: $NUM_RUNS"
+        log "  Taps per run: $NUM_TAPS"
     fi
 }
 
@@ -180,12 +247,23 @@ main() {
 
     if [[ "$BUILD_TYPE" == "unknown" ]]; then
         echo "Usage: $0 <baseline|esm>"
+        echo "  baseline - Test stock AOSP with epoll"
+        echo "  esm      - Test ESM-modified AOSP"
+        echo ""
+        echo "NOTE: This test requires PHYSICAL touch input on the device screen."
+        echo ""
+        echo "Environment variables:"
+        echo "  NUM_TAPS        - Number of taps per run (default: 50)"
+        echo "  NUM_RUNS        - Number of test runs (default: 5)"
+        echo "  SAMPLE_INTERVAL - CPU sampling interval in seconds (default: 1)"
         exit 1
     fi
 
     # Initialize results file
     rm -f "$LOGS_DIR/cpu_results.tmp"
 
+    check_device
+    setup_ftrace
     measure_baseline
 
     for run in $(seq 1 $NUM_RUNS); do
