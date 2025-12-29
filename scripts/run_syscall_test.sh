@@ -2,8 +2,10 @@
 #
 # run_syscall_test.sh - Count syscalls during input event processing
 #
-# Uses strace to count epoll_wait/read (baseline) or esm_wait (ESM)
-# syscalls while processing exactly 100 input events.
+# Uses kernel ftrace to count epoll_wait/read (baseline) or esm_wait (ESM)
+# syscalls during PHYSICAL touch input.
+#
+# NOTE: Requires PHYSICAL touch input - automated input bypasses the measured path.
 #
 # Output: CSV file with syscall counts
 #
@@ -15,15 +17,25 @@ RESULTS_DIR="$SCRIPT_DIR/../results"
 LOGS_DIR="$SCRIPT_DIR/../logs"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 
-# Test configuration
-NUM_EVENTS=100      # Events per test
-NUM_RUNS=10         # Number of test runs
-EVENT_DELAY=50      # ms between events
+# Test configuration - can be overridden via environment
+NUM_TAPS=${NUM_TAPS:-50}        # Number of taps to collect
+NUM_RUNS=${NUM_RUNS:-3}         # Number of test runs
+
+# Syscall numbers for ARM64
+# These may vary by kernel version - verify with: ausyscall --dump | grep -E "epoll|read|esm"
+SYSCALL_EPOLL_WAIT=22           # epoll_pwait on ARM64
+SYSCALL_READ=63                 # read on ARM64
+SYSCALL_EPOLL_CTL=21            # epoll_ctl on ARM64
+# ESM syscalls (custom, defined in kernel patches)
+SYSCALL_ESM_REGISTER=443
+SYSCALL_ESM_WAIT=444
+SYSCALL_ESM_CTL=445
 
 # Determine output directory
 BUILD_TYPE="${1:-unknown}"
 OUTPUT_DIR="$RESULTS_DIR/$BUILD_TYPE"
-mkdir -p "$OUTPUT_DIR" "$LOGS_DIR"
+TRACES_DIR="$OUTPUT_DIR/traces"
+mkdir -p "$OUTPUT_DIR" "$TRACES_DIR" "$LOGS_DIR"
 
 OUTPUT_CSV="$OUTPUT_DIR/syscalls.csv"
 LOG_FILE="$LOGS_DIR/syscall_test_$TIMESTAMP.log"
@@ -32,160 +44,202 @@ log() {
     echo "[$(date '+%H:%M:%S')] $1" | tee -a "$LOG_FILE"
 }
 
-# Find system_server PID
-get_system_server_pid() {
-    adb shell "pidof system_server"
+error() {
+    log "ERROR: $1"
+    exit 1
 }
 
-# Check if strace is available
-check_strace() {
-    log "Checking for strace..."
-
-    if ! adb shell "which strace" >/dev/null 2>&1; then
-        log "WARNING: strace not found on device"
-        log "For userdebug builds, strace should be available"
-        log "Attempting to use /system/bin/strace..."
+# Check device connection and root
+check_device() {
+    log "Checking device connection..."
+    if ! adb devices | grep -q "device$"; then
+        error "No device connected"
     fi
-}
 
-# Run strace on system_server
-run_strace_test() {
-    local run_num=$1
-    local strace_output="$LOGS_DIR/strace_run_${run_num}.txt"
-
-    log "Starting syscall test run $run_num..."
-
-    # Get system_server PID
-    local ss_pid=$(get_system_server_pid)
-    if [[ -z "$ss_pid" ]]; then
-        log "ERROR: Could not find system_server PID"
-        return 1
-    fi
-    log "  system_server PID: $ss_pid"
-
-    # Start strace in background
-    # -c: count syscalls
-    # -f: follow forks/threads
-    # -e: filter specific syscalls
-    adb shell "strace -c -f -p $ss_pid \
-        -e epoll_wait,epoll_ctl,read,write,esm_register,esm_wait,esm_ctl \
-        2>&1" > "$strace_output" &
-    STRACE_PID=$!
-
-    # Give strace time to attach
+    log "Enabling root access..."
+    adb root 2>/dev/null || log "Note: Could not get root"
     sleep 2
+}
 
-    log "  Generating $NUM_EVENTS input events..."
+# Get system_server PID
+get_system_server_pid() {
+    adb shell "pidof system_server" | tr -d '\r\n'
+}
 
-    # Generate exactly 100 taps
-    for i in $(seq 1 $NUM_EVENTS); do
-        adb shell "input tap 540 1200"
-        # Small delay to ensure events are processed
-        sleep 0.$(printf "%03d" $EVENT_DELAY)
+# Setup ftrace for syscall and input event tracing
+setup_ftrace() {
+    log "Setting up ftrace for syscall tracing..."
 
-        # Progress indicator
-        if [[ $((i % 25)) -eq 0 ]]; then
-            log "    Generated $i/$NUM_EVENTS events"
+    local ss_pid=$(get_system_server_pid)
+    log "system_server PID: $ss_pid"
+
+    # Check if raw_syscalls tracepoint exists
+    if ! adb shell "test -d /sys/kernel/debug/tracing/events/raw_syscalls" 2>/dev/null; then
+        error "raw_syscalls tracepoint not found. Kernel may not support syscall tracing."
+    fi
+
+    # Check if input_event tracepoint exists (for counting touches)
+    if ! adb shell "test -d /sys/kernel/debug/tracing/events/input/input_event" 2>/dev/null; then
+        error "input_event tracepoint not found. Kernel must include input ftrace tracepoint."
+    fi
+
+    adb shell "
+        # Reset tracing
+        echo 0 > /sys/kernel/debug/tracing/tracing_on
+        echo > /sys/kernel/debug/tracing/trace
+        echo 65536 > /sys/kernel/debug/tracing/buffer_size_kb
+
+        # Enable syscall entry tracing
+        echo 1 > /sys/kernel/debug/tracing/events/raw_syscalls/sys_enter/enable
+
+        # Enable input_event to count physical touches
+        echo 1 > /sys/kernel/debug/tracing/events/input/input_event/enable
+
+        # Filter by system_server PID if possible (reduces noise)
+        # Note: This filters the syscall events, not input events
+        echo $ss_pid > /sys/kernel/debug/tracing/set_event_pid 2>/dev/null || true
+    " || error "Failed to setup ftrace"
+
+    log "ftrace ready (raw_syscalls + input_event enabled)"
+}
+
+# Start ftrace
+start_ftrace() {
+    log "Starting ftrace..."
+    adb shell "
+        echo > /sys/kernel/debug/tracing/trace
+        echo 1 > /sys/kernel/debug/tracing/tracing_on
+    "
+}
+
+# Stop ftrace and pull trace
+stop_ftrace() {
+    local trace_file="$1"
+
+    log "Stopping ftrace..."
+    adb shell "echo 0 > /sys/kernel/debug/tracing/tracing_on"
+
+    # Pull trace
+    adb shell "cat /sys/kernel/debug/tracing/trace" > "$trace_file" || {
+        log "Warning: Could not pull trace"
+        return 1
+    }
+
+    log "Trace saved: $trace_file"
+}
+
+# Disable ftrace
+cleanup_ftrace() {
+    log "Cleaning up ftrace..."
+    adb shell "
+        echo 0 > /sys/kernel/debug/tracing/events/raw_syscalls/sys_enter/enable
+        echo 0 > /sys/kernel/debug/tracing/events/input/input_event/enable
+        echo > /sys/kernel/debug/tracing/set_event_pid 2>/dev/null || true
+    " 2>/dev/null || true
+}
+
+# Count touches in trace (EV_KEY with BTN_TOUCH or EV_ABS events)
+count_touches_in_trace() {
+    local trace_file="$1"
+
+    # Count EV_SYN events (type=0, code=0) which mark end of each touch event batch
+    # Each physical touch generates one SYN_REPORT
+    local syn_count=$(grep -c "input_event:.*type=0.*code=0.*value=0" "$trace_file" 2>/dev/null || echo "0")
+
+    echo "$syn_count"
+}
+
+# Wait for N touches, monitoring the trace
+wait_for_touches() {
+    local target_touches="$1"
+    local trace_file="$2"
+    local check_interval=2
+
+    log ">>> TAP THE SCREEN $target_touches TIMES <<<"
+    log ">>> Starting in 3 seconds... <<<"
+    sleep 3
+
+    local current_touches=0
+    local last_count=0
+
+    while [[ $current_touches -lt $target_touches ]]; do
+        sleep $check_interval
+
+        # Check current touch count from live trace
+        current_touches=$(adb shell "cat /sys/kernel/debug/tracing/trace | grep -c 'input_event:.*type=0.*code=0.*value=0'" 2>/dev/null || echo "0")
+        current_touches=${current_touches//[^0-9]/}  # Clean non-numeric chars
+
+        if [[ $current_touches -gt $last_count ]]; then
+            log ">>> $current_touches / $target_touches touches detected <<<"
+            last_count=$current_touches
         fi
     done
 
-    # Wait for event processing to complete
-    sleep 2
-
-    # Stop strace (send interrupt to device strace)
-    # This is tricky - we need to interrupt strace on the device
-    adb shell "pkill -INT strace" 2>/dev/null || true
-
-    # Wait for local adb shell to finish
-    sleep 2
-    kill $STRACE_PID 2>/dev/null || true
-    wait $STRACE_PID 2>/dev/null || true
-
-    log "  Syscall test run $run_num complete"
-
-    # Parse strace output
-    parse_strace_output "$strace_output" "$run_num"
+    log ">>> All $target_touches touches received! <<<"
 }
 
-# Alternative: Use /proc/[pid]/syscall counting
-run_proc_test() {
-    local run_num=$1
-
-    log "Starting syscall test run $run_num (proc method)..."
-
-    # Get system_server PID
-    local ss_pid=$(get_system_server_pid)
-
-    # Capture syscall stats before
-    local before_file="$LOGS_DIR/proc_before_${run_num}.txt"
-    adb shell "cat /proc/$ss_pid/io" > "$before_file" 2>/dev/null || true
-
-    # Generate events
-    log "  Generating $NUM_EVENTS input events..."
-    for i in $(seq 1 $NUM_EVENTS); do
-        adb shell "input tap 540 1200"
-        sleep 0.05
-    done
-
-    # Wait for processing
-    sleep 2
-
-    # Capture syscall stats after
-    local after_file="$LOGS_DIR/proc_after_${run_num}.txt"
-    adb shell "cat /proc/$ss_pid/io" > "$after_file" 2>/dev/null || true
-
-    # Calculate delta (rough estimate based on read/write syscalls)
-    local before_syscalls=$(grep "syscr:" "$before_file" 2>/dev/null | awk '{print $2}' || echo "0")
-    local after_syscalls=$(grep "syscr:" "$after_file" 2>/dev/null | awk '{print $2}' || echo "0")
-
-    local delta=$((after_syscalls - before_syscalls))
-    log "  Run $run_num: ~$delta syscalls (read syscalls only)"
-
-    echo "$run_num,$delta,0,0,0" >> "$LOGS_DIR/syscall_results.tmp"
-}
-
-# Parse strace -c output
-parse_strace_output() {
-    local input_file="$1"
+# Parse syscalls from trace
+parse_syscalls() {
+    local trace_file="$1"
     local run_num="$2"
 
-    # strace -c output format:
-    # % time     seconds  usecs/call     calls    errors syscall
-    # ------ ----------- ----------- --------- --------- ----------------
-    #  45.00    0.123456          12     10000           epoll_wait
+    log "Parsing syscalls from trace..."
 
-    local epoll_wait=0
-    local read_calls=0
-    local esm_wait=0
-    local esm_register=0
+    # Count syscalls by number
+    # Format: sys_enter: NR 63 (...)  for read
+    local epoll_wait_count=$(grep -cE "sys_enter: NR $SYSCALL_EPOLL_WAIT " "$trace_file" 2>/dev/null || echo "0")
+    local read_count=$(grep -cE "sys_enter: NR $SYSCALL_READ " "$trace_file" 2>/dev/null || echo "0")
+    local epoll_ctl_count=$(grep -cE "sys_enter: NR $SYSCALL_EPOLL_CTL " "$trace_file" 2>/dev/null || echo "0")
+    local esm_register_count=$(grep -cE "sys_enter: NR $SYSCALL_ESM_REGISTER " "$trace_file" 2>/dev/null || echo "0")
+    local esm_wait_count=$(grep -cE "sys_enter: NR $SYSCALL_ESM_WAIT " "$trace_file" 2>/dev/null || echo "0")
+    local esm_ctl_count=$(grep -cE "sys_enter: NR $SYSCALL_ESM_CTL " "$trace_file" 2>/dev/null || echo "0")
 
-    # Parse syscall counts from strace output
-    if [[ -f "$input_file" ]]; then
-        epoll_wait=$(grep -oP '\d+(?=\s+\d*\s+epoll_wait)' "$input_file" | head -1 || echo "0")
-        read_calls=$(grep -oP '\d+(?=\s+\d*\s+read$)' "$input_file" | head -1 || echo "0")
-        esm_wait=$(grep -oP '\d+(?=\s+\d*\s+esm_wait)' "$input_file" | head -1 || echo "0")
-        esm_register=$(grep -oP '\d+(?=\s+\d*\s+esm_register)' "$input_file" | head -1 || echo "0")
-    fi
+    # Count actual touches
+    local touch_count=$(count_touches_in_trace "$trace_file")
 
-    # Default to 0 if parsing failed
-    epoll_wait=${epoll_wait:-0}
-    read_calls=${read_calls:-0}
-    esm_wait=${esm_wait:-0}
-    esm_register=${esm_register:-0}
+    # Calculate totals
+    local epoll_total=$((epoll_wait_count + read_count))
+    local esm_total=$((esm_wait_count))
 
-    local total=$((epoll_wait + read_calls + esm_wait))
-
-    log "  Run $run_num: epoll_wait=$epoll_wait, read=$read_calls, esm_wait=$esm_wait, total=$total"
+    log "  Touches detected: $touch_count"
+    log "  epoll_wait: $epoll_wait_count"
+    log "  read: $read_count"
+    log "  epoll_ctl: $epoll_ctl_count"
+    log "  esm_register: $esm_register_count"
+    log "  esm_wait: $esm_wait_count"
+    log "  esm_ctl: $esm_ctl_count"
 
     # Append to results
-    echo "$run_num,$epoll_wait,$read_calls,$esm_wait,$total" >> "$LOGS_DIR/syscall_results.tmp"
+    echo "$run_num,$touch_count,$epoll_wait_count,$read_count,$epoll_ctl_count,$esm_register_count,$esm_wait_count,$esm_ctl_count" >> "$LOGS_DIR/syscall_results.tmp"
+}
+
+# Run a single syscall test
+run_syscall_test() {
+    local run_num="$1"
+
+    log "Starting syscall test run $run_num ($NUM_TAPS taps)..."
+    log "NOTE: This test requires PHYSICAL touch input on the device screen"
+
+    local trace_file="$TRACES_DIR/syscall_trace_run${run_num}.txt"
+
+    start_ftrace
+
+    # Wait for user to perform taps
+    wait_for_touches "$NUM_TAPS" "$trace_file"
+
+    stop_ftrace "$trace_file"
+
+    # Parse the trace
+    parse_syscalls "$trace_file" "$run_num"
+
+    log "Syscall test run $run_num complete"
 }
 
 # Generate final CSV
 generate_csv() {
     log "Generating CSV output..."
 
-    echo "run,epoll_wait,read,esm_wait,total" > "$OUTPUT_CSV"
+    echo "run,touches,epoll_wait,read,epoll_ctl,esm_register,esm_wait,esm_ctl" > "$OUTPUT_CSV"
 
     if [[ -f "$LOGS_DIR/syscall_results.tmp" ]]; then
         cat "$LOGS_DIR/syscall_results.tmp" >> "$OUTPUT_CSV"
@@ -201,26 +255,31 @@ print_summary() {
 
     if [[ -f "$OUTPUT_CSV" ]]; then
         # Calculate averages
-        local avg_epoll=$(tail -n +2 "$OUTPUT_CSV" | cut -d, -f2 | \
+        local avg_touches=$(tail -n +2 "$OUTPUT_CSV" | cut -d, -f2 | \
             awk '{sum+=$1; count++} END {if(count>0) printf "%.0f", sum/count; else print "0"}')
-        local avg_read=$(tail -n +2 "$OUTPUT_CSV" | cut -d, -f3 | \
+        local avg_epoll=$(tail -n +2 "$OUTPUT_CSV" | cut -d, -f3 | \
             awk '{sum+=$1; count++} END {if(count>0) printf "%.0f", sum/count; else print "0"}')
-        local avg_esm=$(tail -n +2 "$OUTPUT_CSV" | cut -d, -f4 | \
+        local avg_read=$(tail -n +2 "$OUTPUT_CSV" | cut -d, -f4 | \
             awk '{sum+=$1; count++} END {if(count>0) printf "%.0f", sum/count; else print "0"}')
-        local avg_total=$(tail -n +2 "$OUTPUT_CSV" | cut -d, -f5 | \
+        local avg_esm_wait=$(tail -n +2 "$OUTPUT_CSV" | cut -d, -f7 | \
             awk '{sum+=$1; count++} END {if(count>0) printf "%.0f", sum/count; else print "0"}')
 
-        log "  Events per test: $NUM_EVENTS"
+        log "  Taps per run: $NUM_TAPS"
         log "  Number of runs: $NUM_RUNS"
-        log "  Average epoll_wait: $avg_epoll"
-        log "  Average read: $avg_read"
-        log "  Average esm_wait: $avg_esm"
-        log "  Average total: $avg_total"
+        log "  Average touches detected: $avg_touches"
+        log "  Average epoll_wait calls: $avg_epoll"
+        log "  Average read calls: $avg_read"
+        log "  Average esm_wait calls: $avg_esm_wait"
 
-        # Calculate per-event ratio
-        if [[ $avg_total -gt 0 ]]; then
-            local ratio=$(echo "scale=2; $avg_total / $NUM_EVENTS" | bc)
-            log "  Syscalls per event: $ratio"
+        # Calculate per-touch ratio
+        if [[ $avg_touches -gt 0 ]]; then
+            if [[ $avg_esm_wait -gt 0 ]]; then
+                local ratio=$(echo "scale=2; $avg_esm_wait / $avg_touches" | bc)
+                log "  ESM syscalls per touch: $ratio"
+            elif [[ $avg_epoll -gt 0 ]]; then
+                local epoll_ratio=$(echo "scale=2; ($avg_epoll + $avg_read) / $avg_touches" | bc)
+                log "  epoll+read syscalls per touch: $epoll_ratio"
+            fi
         fi
     fi
 }
@@ -228,32 +287,45 @@ print_summary() {
 # Main execution
 main() {
     log "=========================================="
-    log "ESM Syscall Test - Build: $BUILD_TYPE"
+    log "ESM Syscall Test (ftrace) - Build: $BUILD_TYPE"
     log "=========================================="
 
     if [[ "$BUILD_TYPE" == "unknown" ]]; then
         echo "Usage: $0 <baseline|esm>"
+        echo "  baseline - Test stock AOSP with epoll"
+        echo "  esm      - Test ESM-modified AOSP"
+        echo ""
+        echo "NOTE: This test requires PHYSICAL touch input on the device screen."
+        echo ""
+        echo "Environment variables:"
+        echo "  NUM_TAPS  - Number of taps per run (default: 50)"
+        echo "  NUM_RUNS  - Number of test runs (default: 3)"
         exit 1
     fi
 
-    # Initialize results
+    # Initialize
     rm -f "$LOGS_DIR/syscall_results.tmp"
 
-    check_strace
+    check_device
+    setup_ftrace
 
     for run in $(seq 1 $NUM_RUNS); do
-        # Try strace method first, fall back to proc method
-        run_strace_test $run || run_proc_test $run
+        run_syscall_test $run
 
         # Brief pause between runs
-        sleep 5
+        if [[ $run -lt $NUM_RUNS ]]; then
+            log "Pausing before next run (10 seconds)..."
+            sleep 10
+        fi
     done
 
+    cleanup_ftrace
     generate_csv
     print_summary
 
     log "=========================================="
     log "Syscall test complete!"
+    log "Traces: $TRACES_DIR"
     log "Results: $OUTPUT_CSV"
     log "=========================================="
 }

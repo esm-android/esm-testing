@@ -24,9 +24,6 @@ TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 TAP_SAMPLES=${TAP_SAMPLES:-100}
 SCROLL_SAMPLES=${SCROLL_SAMPLES:-20}
 SWIPE_SAMPLES=${SWIPE_SAMPLES:-20}
-TAP_DELAY=${TAP_DELAY:-1}
-SCROLL_DELAY=${SCROLL_DELAY:-2}
-SWIPE_DELAY=${SWIPE_DELAY:-2}
 
 # Determine output directory based on build type
 BUILD_TYPE="${1:-unknown}"
@@ -139,6 +136,41 @@ stop_ftrace() {
     log "Trace saved: $local_path"
 }
 
+# Count touches in live trace (EV_SYN with SYN_REPORT marks end of each event batch)
+count_live_touches() {
+    # Count SYN_REPORT events (type=0, code=0, value=0)
+    local count=$(adb shell "cat /sys/kernel/debug/tracing/trace | grep -c 'input_event:.*type=0.*code=0.*value=0'" 2>/dev/null || echo "0")
+    echo "${count//[^0-9]/}"  # Clean non-numeric chars
+}
+
+# Wait for N touches/gestures, monitoring the trace in real-time
+wait_for_touches() {
+    local target_count="$1"
+    local gesture_type="$2"
+    local check_interval=2
+
+    log ">>> PERFORM $target_count ${gesture_type}S ON THE SCREEN <<<"
+    log ">>> Starting in 3 seconds... <<<"
+    sleep 3
+
+    local current_count=0
+    local last_count=0
+
+    while [[ $current_count -lt $target_count ]]; do
+        sleep $check_interval
+
+        # Check current touch count from live trace
+        current_count=$(count_live_touches)
+
+        if [[ $current_count -gt $last_count ]]; then
+            log ">>> $current_count / $target_count ${gesture_type}s detected <<<"
+            last_count=$current_count
+        fi
+    done
+
+    log ">>> All $target_count ${gesture_type}s received! <<<"
+}
+
 # Run single tap test with ftrace
 # IMPORTANT: Requires physical touch input - automated input tap bypasses evdev
 test_single_tap() {
@@ -149,14 +181,8 @@ test_single_tap() {
 
     start_ftrace "tap_trace"
 
-    log ">>> TOUCH THE SCREEN $TAP_SAMPLES TIMES (1 tap every ${TAP_DELAY}s) <<<"
-    log ">>> Starting in 3 seconds... <<<"
-    sleep 3
-
-    # Wait for user to perform taps
-    local total_time=$((TAP_SAMPLES * TAP_DELAY + 5))
-    log ">>> Waiting ${total_time}s for $TAP_SAMPLES taps... <<<"
-    sleep $total_time
+    # Wait for user to perform taps (counted in real-time)
+    wait_for_touches "$TAP_SAMPLES" "TAP"
 
     stop_ftrace "tap_trace" "$trace_file"
 
@@ -172,13 +198,8 @@ test_scroll() {
 
     start_ftrace "scroll_trace"
 
-    log ">>> SCROLL THE SCREEN $SCROLL_SAMPLES TIMES (1 scroll every ${SCROLL_DELAY}s) <<<"
-    log ">>> Starting in 3 seconds... <<<"
-    sleep 3
-
-    local total_time=$((SCROLL_SAMPLES * SCROLL_DELAY + 5))
-    log ">>> Waiting ${total_time}s for $SCROLL_SAMPLES scrolls... <<<"
-    sleep $total_time
+    # Wait for user to perform scrolls (counted in real-time)
+    wait_for_touches "$SCROLL_SAMPLES" "SCROLL"
 
     stop_ftrace "scroll_trace" "$trace_file"
 
@@ -194,13 +215,8 @@ test_fast_swipe() {
 
     start_ftrace "swipe_trace"
 
-    log ">>> SWIPE THE SCREEN QUICKLY $SWIPE_SAMPLES TIMES (1 swipe every ${SWIPE_DELAY}s) <<<"
-    log ">>> Starting in 3 seconds... <<<"
-    sleep 3
-
-    local total_time=$((SWIPE_SAMPLES * SWIPE_DELAY + 5))
-    log ">>> Waiting ${total_time}s for $SWIPE_SAMPLES swipes... <<<"
-    sleep $total_time
+    # Wait for user to perform swipes (counted in real-time)
+    wait_for_touches "$SWIPE_SAMPLES" "SWIPE"
 
     stop_ftrace "swipe_trace" "$trace_file"
 
@@ -244,6 +260,13 @@ main() {
         echo "Usage: $0 <baseline|esm>"
         echo "  baseline - Test stock AOSP with epoll"
         echo "  esm      - Test ESM-modified AOSP"
+        echo ""
+        echo "NOTE: This test requires PHYSICAL touch input on the device screen."
+        echo ""
+        echo "Environment variables:"
+        echo "  TAP_SAMPLES    - Number of tap samples (default: 100)"
+        echo "  SCROLL_SAMPLES - Number of scroll samples (default: 20)"
+        echo "  SWIPE_SAMPLES  - Number of swipe samples (default: 20)"
         exit 1
     fi
 
