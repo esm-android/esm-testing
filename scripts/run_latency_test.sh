@@ -1,11 +1,14 @@
 #!/bin/bash
 #
-# run_latency_test.sh - Measure input event latency using Perfetto
+# run_latency_test.sh - Measure input event latency using ftrace
 #
-# Uses Perfetto tracing to measure actual input pipeline latency:
-#   kernel input_event → InputReader → InputDispatcher → App
+# Uses kernel ftrace to measure input pipeline latency:
+#   T1: kernel input_event (trace_input_event in evdev.c)
+#   T2: sched_wakeup for InputReader/InputDispatcher
+#   Latency = T2 - T1
 #
 # This captures the epoll/ESM difference in userspace event delivery.
+# NOTE: Requires PHYSICAL touch input - automated input bypasses the measured path.
 #
 # Output: CSV file with latency measurements
 #
@@ -33,9 +36,6 @@ mkdir -p "$OUTPUT_DIR" "$TRACES_DIR" "$LOGS_DIR"
 
 OUTPUT_CSV="$OUTPUT_DIR/latency.csv"
 LOG_FILE="$LOGS_DIR/latency_test_$TIMESTAMP.log"
-
-# Perfetto config
-PERFETTO_CFG="$SCRIPT_DIR/perfetto_input.cfg"
 
 # Touch device (auto-detected)
 TOUCH_DEVICE=""
@@ -139,37 +139,6 @@ stop_ftrace() {
     log "Trace saved: $local_path"
 }
 
-# Generate tap using sendevent (low-level, goes through full kernel path)
-# This is more accurate than `input tap` which bypasses some of the input stack
-generate_tap() {
-    local x="$1"
-    local y="$2"
-
-    # Use input tap for now - sendevent requires device-specific event codes
-    # The key is that perfetto traces the full path regardless of injection method
-    adb shell "input tap $x $y"
-}
-
-# Generate scroll gesture
-generate_scroll() {
-    local x="$1"
-    local y1="$2"
-    local y2="$3"
-    local duration="$4"
-
-    adb shell "input swipe $x $y1 $x $y2 $duration"
-}
-
-# Generate swipe gesture
-generate_swipe() {
-    local x="$1"
-    local y1="$2"
-    local y2="$3"
-    local duration="$4"
-
-    adb shell "input swipe $x $y1 $x $y2 $duration"
-}
-
 # Run single tap test with ftrace
 # IMPORTANT: Requires physical touch input - automated input tap bypasses evdev
 test_single_tap() {
@@ -268,7 +237,7 @@ print_summary() {
 # Main execution
 main() {
     log "=========================================="
-    log "ESM Latency Test (Perfetto) - Build: $BUILD_TYPE"
+    log "ESM Latency Test (ftrace) - Build: $BUILD_TYPE"
     log "=========================================="
 
     if [[ "$BUILD_TYPE" == "unknown" ]]; then
