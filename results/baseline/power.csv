@@ -1,0 +1,131 @@
+scenario,run,duration_sec,battery_drain_pct,start_current_ma,end_current_ma,avg_current_ma,wakeups_per_sec
+[15:16:38] Running idle power test (run 1, 900s)...
+[15:16:38] Resetting battery statistics...
+[15:16:41]   Initial: battery=88%, current=-462mA
+[15:16:41]   Waiting 900 seconds (idle) with current sampling every 10s...
+[15:21:44]     300s / 900s elapsed
+[15:26:48]     600s / 900s elapsed
+[15:31:51]     900s / 900s elapsed
+[15:31:51]   Final: battery=84%, drain=4%
+[15:31:51]   Average current: -584.3mA
+[15:31:51]   Wakeups: 8414968 total, 9247.21/sec
+idle,1,910,4,-462,-631,-584.3,9247.21
+[15:32:51] Running idle power test (run 2, 900s)...
+[15:32:51] Resetting battery statistics...
+[15:32:54]   Initial: battery=83%, current=-610mA
+[15:32:54]   Waiting 900 seconds (idle) with current sampling every 10s...
+[15:37:57]     300s / 900s elapsed
+[15:43:01]     600s / 900s elapsed
+[15:48:05]     900s / 900s elapsed
+[15:48:05]   Final: battery=79%, drain=4%
+[15:48:05]   Average current: -594.0mA
+[15:48:05]   Wakeups: 8479176 total, 9307.54/sec
+idle,2,911,4,-610,-577,-594.0,9307.54
+[15:49:05] Running idle power test (run 3, 900s)...
+[15:49:05] Resetting battery statistics...
+[15:49:08]   Initial: battery=79%, current=-391mA
+[15:49:08]   Waiting 900 seconds (idle) with current sampling every 10s...
+[15:54:12]     300s / 900s elapsed
+[15:59:16]     600s / 900s elapsed
+[16:04:19]     900s / 900s elapsed
+[16:04:19]   Final: battery=77%, drain=2%
+[16:04:19]   Average current: -446.0mA
+[16:04:19]   Wakeups: 8337328 total, 9151.84/sec
+idle,3,911,2,-391,-497,-446.0,9151.84
+[16:05:19] Running idle power test (run 4, 900s)...
+[16:05:19] Resetting battery statistics...
+[16:05:22]   Initial: battery=77%, current=-455mA
+[16:05:22]   Waiting 900 seconds (idle) with current sampling every 10s...
+[16:10:25]     300s / 900s elapsed
+[16:15:30]     600s / 900s elapsed
+[16:20:35]     900s / 900s elapsed
+[16:20:35]   Final: battery=76%, drain=1%
+[16:20:35]   Average current: -345.1mA
+[16:20:35]   Wakeups: 2680759 total, 2936.20/sec
+idle,4,913,1,-455,-200,-345.1,2936.20
+[16:21:35] Running idle power test (run 5, 900s)...
+[16:21:35] Resetting battery statistics...
+[16:21:38]   Initial: battery=76%, current=-5187mA
+[16:21:38]   Waiting 900 seconds (idle) with current sampling every 10s...
+[16:26:43]     300s / 900s elapsed
+[16:31:48]     600s / 900s elapsed
+[16:36:53]     900s / 900s elapsed
+[16:36:53]   Final: battery=76%, drain=0%
+[16:36:53]   Average current: -445.3mA
+[16:36:53]   Wakeups: 874218 total, 955.42/sec
+idle,5,915,0,-5187,-226,-445.3,955.42
+[16:38:53] Running active power test (run 1, 900s)...
+[16:38:53] NOTE: This test requires PHYSICAL touch input on the device screen
+[16:38:53] Resetting battery statistics...
+[16:38:55]   Initial: battery=76%, current=-120mA
+[16:38:55] >>> TAP THE SCREEN CONTINUOUSLY (~2 taps/sec) for 900 seconds <<<
+[16:38:55] >>> Starting in 5 seconds... <<<
+[16:39:00]   Sampling current for 900 seconds during physical interaction...
+[16:44:03]     300s / 900s elapsed
+[16:49:07]     600s / 900s elapsed
+[16:54:10]     900s / 900s elapsed
+[16:54:10] >>> Test period complete - you can stop tapping <<<
+[16:54:10]   Final: battery=75%, drain=1%
+[16:54:10]   Average current: -263.6mA
+[16:54:10]   Wakeups: 926988 total, 1013.10/sec
+active,1,915,1,-120,-526,-263.6,1013.10
+[16:55:10] Running active power test (run 2, 900s)...
+[16:55:10] NOTE: This test requires PHYSICAL touch input on the device screen
+[16:55:10] Resetting battery statistics...
+[16:55:12]   Initial: battery=75%, current=-229mA
+[16:55:12] >>> TAP THE SCREEN CONTINUOUSLY (~2 taps/sec) for 900 seconds <<<
+[16:55:12] >>> Starting in 5 seconds... <<<
+[16:55:17]   Sampling current for 900 seconds during physical interaction...
+[17:00:21]     300s / 900s elapsed
+[17:05:24]     600s / 900s elapsed
+[17:10:28]     900s / 900s elapsed
+[17:10:28] >>> Test period complete - you can stop tapping <<<
+[17:10:28]   Final: battery=73%, drain=2%
+[17:10:28]   Average current: -476.7mA
+[17:10:28]   Wakeups: 795021 total, 867.92/sec
+active,2,916,2,-229,-173,-476.7,867.92
+[17:11:28] Running active power test (run 3, 900s)...
+[17:11:28] NOTE: This test requires PHYSICAL touch input on the device screen
+[17:11:28] Resetting battery statistics...
+[17:11:30]   Initial: battery=73%, current=-281mA
+[17:11:30] >>> TAP THE SCREEN CONTINUOUSLY (~2 taps/sec) for 900 seconds <<<
+[17:11:30] >>> Starting in 5 seconds... <<<
+[17:11:35]   Sampling current for 900 seconds during physical interaction...
+[17:16:40]     300s / 900s elapsed
+[17:21:45]     600s / 900s elapsed
+[17:26:49]     900s / 900s elapsed
+[17:26:49] >>> Test period complete - you can stop tapping <<<
+[17:26:49]   Final: battery=73%, drain=0%
+[17:26:49]   Average current: -494.2mA
+[17:26:49]   Wakeups: 1021010 total, 1111.00/sec
+active,3,919,0,-281,-91,-494.2,1111.00
+[17:27:49] Running active power test (run 4, 900s)...
+[17:27:49] NOTE: This test requires PHYSICAL touch input on the device screen
+[17:27:49] Resetting battery statistics...
+[17:27:52]   Initial: battery=73%, current=-236mA
+[17:27:52] >>> TAP THE SCREEN CONTINUOUSLY (~2 taps/sec) for 900 seconds <<<
+[17:27:52] >>> Starting in 5 seconds... <<<
+[17:27:57]   Sampling current for 900 seconds during physical interaction...
+[17:33:02]     300s / 900s elapsed
+[17:38:07]     600s / 900s elapsed
+[17:43:12]     900s / 900s elapsed
+[17:43:12] >>> Test period complete - you can stop tapping <<<
+[17:43:12]   Final: battery=73%, drain=0%
+[17:43:12]   Average current: -902.2mA
+[17:43:12]   Wakeups: 1059583 total, 1151.72/sec
+active,4,920,0,-236,-385,-902.2,1151.72
+[17:44:12] Running active power test (run 5, 900s)...
+[17:44:12] NOTE: This test requires PHYSICAL touch input on the device screen
+[17:44:12] Resetting battery statistics...
+[17:44:15]   Initial: battery=73%, current=-250mA
+[17:44:15] >>> TAP THE SCREEN CONTINUOUSLY (~2 taps/sec) for 900 seconds <<<
+[17:44:15] >>> Starting in 5 seconds... <<<
+[17:44:20]   Sampling current for 900 seconds during physical interaction...
+[17:49:25]     300s / 900s elapsed
+[17:54:29]     600s / 900s elapsed
+[17:59:33]     900s / 900s elapsed
+[17:59:33] >>> Test period complete - you can stop tapping <<<
+[17:59:33]   Final: battery=73%, drain=0%
+[17:59:33]   Average current: -853.1mA
+[17:59:33]   Wakeups: 980306 total, 1067.87/sec
+active,5,918,0,-250,-5187,-853.1,1067.87

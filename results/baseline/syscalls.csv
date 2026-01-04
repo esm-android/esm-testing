@@ -1,0 +1,4 @@
+run,touches,epoll_wait,read,epoll_ctl,esm_register,esm_wait,esm_ctl
+1,65,1711,615,0,0,0,0
+2,52,2061,736,0,0,0,0
+3,65,1313,467,0,0,0,0

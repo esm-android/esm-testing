@@ -166,11 +166,23 @@ parse_cpu_results() {
     local input_file="$1"
     local run_num="$2"
 
-    # Extract system_server CPU samples
-    local ss_samples=$(grep "system_server" "$input_file" | awk '{print $9}' | grep -oP '[\d.]+' || echo "")
+    # Extract system_server CPU samples (column 9 is %CPU)
+    local ss_samples=$(grep "system_server" "$input_file" | awk '{print $9}' | grep -oE '[0-9.]+' || echo "")
 
-    # Extract total CPU samples (from header lines)
-    local total_samples=$(grep -oP '\d+(?=% cpu)' "$input_file" || echo "")
+    # Extract total CPU usage from header lines
+    # Format: "800%cpu  71%user   7%nice  71%sys 643%idle ..."
+    # Total CPU = (total_capacity - idle) / total_capacity * 100
+    local total_cpu_samples=""
+    while IFS= read -r line; do
+        # Extract total capacity (e.g., 800 from "800%cpu") and idle (e.g., 643 from "643%idle")
+        local capacity=$(echo "$line" | grep -oE '[0-9]+%cpu' | grep -oE '[0-9]+')
+        local idle=$(echo "$line" | grep -oE '[0-9]+%idle' | grep -oE '[0-9]+')
+        if [[ -n "$capacity" && -n "$idle" && "$capacity" -gt 0 ]]; then
+            # Calculate usage percentage: (capacity - idle) / capacity * 100
+            local usage=$(echo "scale=1; ($capacity - $idle) * 100 / $capacity" | bc)
+            total_cpu_samples="$total_cpu_samples $usage"
+        fi
+    done < <(grep '%cpu.*%idle' "$input_file")
 
     # Calculate averages
     local ss_count=0
@@ -182,8 +194,8 @@ parse_cpu_results() {
 
     local total_count=0
     local total_sum=0
-    for val in $total_samples; do
-        total_sum=$((total_sum + val))
+    for val in $total_cpu_samples; do
+        total_sum=$(echo "$total_sum + $val" | bc)
         total_count=$((total_count + 1))
     done
 
@@ -195,7 +207,7 @@ parse_cpu_results() {
     fi
 
     if [[ $total_count -gt 0 ]]; then
-        TOTAL_CPU=$((total_sum / total_count))
+        TOTAL_CPU=$(echo "scale=1; $total_sum / $total_count" | bc)
     else
         TOTAL_CPU="0"
     fi

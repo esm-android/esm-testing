@@ -89,15 +89,14 @@ setup_ftrace() {
         echo > /sys/kernel/debug/tracing/trace
         echo 65536 > /sys/kernel/debug/tracing/buffer_size_kb
 
+        # Clear any PID filter (we need to capture input_event from kernel context)
+        echo > /sys/kernel/debug/tracing/set_event_pid 2>/dev/null || true
+
         # Enable syscall entry tracing
         echo 1 > /sys/kernel/debug/tracing/events/raw_syscalls/sys_enter/enable
 
         # Enable input_event to count physical touches
         echo 1 > /sys/kernel/debug/tracing/events/input/input_event/enable
-
-        # Filter by system_server PID if possible (reduces noise)
-        # Note: This filters the syscall events, not input events
-        echo $ss_pid > /sys/kernel/debug/tracing/set_event_pid 2>/dev/null || true
     " || error "Failed to setup ftrace"
 
     log "ftrace ready (raw_syscalls + input_event enabled)"
@@ -185,14 +184,18 @@ parse_syscalls() {
 
     log "Parsing syscalls from trace..."
 
-    # Count syscalls by number
-    # Format: sys_enter: NR 63 (...)  for read
-    local epoll_wait_count=$(grep -cE "sys_enter: NR $SYSCALL_EPOLL_WAIT " "$trace_file" 2>/dev/null || echo "0")
-    local read_count=$(grep -cE "sys_enter: NR $SYSCALL_READ " "$trace_file" 2>/dev/null || echo "0")
-    local epoll_ctl_count=$(grep -cE "sys_enter: NR $SYSCALL_EPOLL_CTL " "$trace_file" 2>/dev/null || echo "0")
-    local esm_register_count=$(grep -cE "sys_enter: NR $SYSCALL_ESM_REGISTER " "$trace_file" 2>/dev/null || echo "0")
-    local esm_wait_count=$(grep -cE "sys_enter: NR $SYSCALL_ESM_WAIT " "$trace_file" 2>/dev/null || echo "0")
-    local esm_ctl_count=$(grep -cE "sys_enter: NR $SYSCALL_ESM_CTL " "$trace_file" 2>/dev/null || echo "0")
+    # Get system_server PID for filtering (ftrace sometimes shows <...>-PID instead of name-PID)
+    local ss_pid=$(get_system_server_pid)
+
+    # Count syscalls by number (filter by system_server name OR PID)
+    # Format: "   system_server-1709  [003] ....   890.853999: sys_enter: NR 63 (...)"
+    # Or:     "           <...>-1709  [001] ....  1129.638207: sys_enter: NR 113 (...)"
+    local epoll_wait_count=$(grep -E "(system_server|<\.\.\.>)-${ss_pid}.*sys_enter: NR $SYSCALL_EPOLL_WAIT " "$trace_file" 2>/dev/null | wc -l || echo "0")
+    local read_count=$(grep -E "(system_server|<\.\.\.>)-${ss_pid}.*sys_enter: NR $SYSCALL_READ " "$trace_file" 2>/dev/null | wc -l || echo "0")
+    local epoll_ctl_count=$(grep -E "(system_server|<\.\.\.>)-${ss_pid}.*sys_enter: NR $SYSCALL_EPOLL_CTL " "$trace_file" 2>/dev/null | wc -l || echo "0")
+    local esm_register_count=$(grep -E "(system_server|<\.\.\.>)-${ss_pid}.*sys_enter: NR $SYSCALL_ESM_REGISTER " "$trace_file" 2>/dev/null | wc -l || echo "0")
+    local esm_wait_count=$(grep -E "(system_server|<\.\.\.>)-${ss_pid}.*sys_enter: NR $SYSCALL_ESM_WAIT " "$trace_file" 2>/dev/null | wc -l || echo "0")
+    local esm_ctl_count=$(grep -E "(system_server|<\.\.\.>)-${ss_pid}.*sys_enter: NR $SYSCALL_ESM_CTL " "$trace_file" 2>/dev/null | wc -l || echo "0")
 
     # Count actual touches
     local touch_count=$(count_touches_in_trace "$trace_file")
