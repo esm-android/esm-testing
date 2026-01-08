@@ -94,10 +94,11 @@ setup_ftrace() {
     fi
 
     # Enable input and sched tracepoints
+    # Use large buffer (128MB) to avoid sched_wakeup flooding dropping input events
     adb shell "
         echo 0 > /sys/kernel/debug/tracing/tracing_on
         echo > /sys/kernel/debug/tracing/trace
-        echo 32768 > /sys/kernel/debug/tracing/buffer_size_kb
+        echo 131072 > /sys/kernel/debug/tracing/buffer_size_kb
         echo 1 > /sys/kernel/debug/tracing/events/input/input_event/enable
         echo 1 > /sys/kernel/debug/tracing/events/sched/sched_wakeup/enable
     " || error "Failed to setup ftrace"
@@ -148,6 +149,8 @@ wait_for_touches() {
     local target_count="$1"
     local gesture_type="$2"
     local check_interval=2
+    local no_progress_timeout=30  # seconds without new input before warning
+    local no_progress_count=0
 
     log ">>> PERFORM $target_count ${gesture_type}S ON THE SCREEN <<<"
     log ">>> Starting in 3 seconds... <<<"
@@ -165,10 +168,22 @@ wait_for_touches() {
         if [[ $current_count -gt $last_count ]]; then
             log ">>> $current_count / $target_count ${gesture_type}s detected <<<"
             last_count=$current_count
+            no_progress_count=0
+        else
+            no_progress_count=$((no_progress_count + check_interval))
+            if [[ $no_progress_count -ge $no_progress_timeout ]]; then
+                log ">>> WARNING: No input detected for ${no_progress_timeout}s <<<"
+                log ">>> Got $current_count / $target_count - continuing with available samples <<<"
+                break
+            fi
         fi
     done
 
-    log ">>> All $target_count ${gesture_type}s received! <<<"
+    if [[ $current_count -ge $target_count ]]; then
+        log ">>> All $target_count ${gesture_type}s received! <<<"
+    else
+        log ">>> Proceeding with $current_count ${gesture_type}s (timeout) <<<"
+    fi
 }
 
 # Run single tap test with ftrace
